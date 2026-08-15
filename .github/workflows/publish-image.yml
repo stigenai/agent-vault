@@ -57,6 +57,12 @@ jobs:
           # which is exactly the fact worth having in `agent-vault version`.
           echo "version=$(git describe --tags --always)" >>"$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_OUTPUT"
+      # Only the runtime stage is emulated — one `apk add ca-certificates` and
+      # an adduser. Both build stages are pinned to BUILDPLATFORM and the Go
+      # binary is cross-compiled, so QEMU never sees npm or the compiler.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -69,10 +75,11 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          # The gtr nodes this runs on are amd64. Adding arm64 here means QEMU
-          # cross-building a Go binary and an npm frontend for a platform
-          # nothing in the fleet schedules onto.
-          platforms: linux/amd64
+          # Both, so the same pinned digest is schedulable on the amd64 gtr
+          # nodes and on arm64 hosts. Pushing two platforms publishes an OCI
+          # index; the digest the deployment pins is that index, and the
+          # kubelet picks the right child manifest per node.
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}

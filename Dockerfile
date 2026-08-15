@@ -1,5 +1,10 @@
 # ---- Frontend build ----
-FROM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS frontend
+# --platform=$BUILDPLATFORM pins this to the machine doing the building. Its
+# output is JavaScript and CSS, identical for every target, so emulating an
+# `npm ci && npm run build` once per architecture would buy nothing and cost
+# most of the build. Both build stages below run native; only the tiny runtime
+# stage is per-architecture.
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS frontend
 
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
@@ -8,19 +13,25 @@ COPY web/ .
 RUN npm run build
 
 # ---- Go build stage ----
-FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+# Also native, cross-compiling to TARGETARCH below. The binary is CGO_ENABLED=0
+# pure Go, which is exactly the case where the Go toolchain cross-compiles for
+# free and QEMU is pure waste.
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 ARG POSTHOG_API_KEY=
+# Supplied by BuildKit from the --platform being built, not by the caller.
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=frontend /internal/server/webdist /src/internal/server/webdist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w \
     -X github.com/Infisical/agent-vault/cmd.version=${VERSION} \
     -X github.com/Infisical/agent-vault/cmd.commit=${COMMIT} \
     -X github.com/Infisical/agent-vault/cmd.date=${BUILD_DATE} \
