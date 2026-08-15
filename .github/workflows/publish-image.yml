@@ -27,18 +27,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Prefer the self-hosted fleet-gtr pool; fall back to Depot when the fleet
-  # heartbeat says it can't host the job. Never hardcode a pool here.
-  route:
-    uses: stigenai/infra-blocks/.github/workflows/route-runner.yml@main
-    with:
-      # 2 | 8 | 16 are the only sizes it maps. An npm frontend build plus a Go
-      # build wants the middle one.
-      size: "8"
-
   build:
-    needs: route
-    runs-on: ${{ needs.route.outputs.runner }}
+    # NOT infra-blocks/route-runner.yml, which every other fleet build uses.
+    # This repository is a fork of a public one and is therefore public;
+    # infra-blocks is private, and a public caller cannot resolve a reusable
+    # workflow from a private repository whatever the org access policy says.
+    # The first run after merge failed at startup with zero jobs created for
+    # exactly that reason.
+    #
+    # Hosted runners are free and unlimited for public repositories, and the
+    # integrity story here does not rest on which machine built the image: the
+    # deployment pins a digest. If building on fleet hardware ever does matter,
+    # the fix is to replace this fork with a PRIVATE mirror (GitHub will not
+    # flip a public fork to private), which restores route-runner as a side
+    # effect.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
