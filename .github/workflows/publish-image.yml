@@ -1,0 +1,105 @@
+# Publish the fleet's own build of Agent Vault to GHCR.
+#
+# WHY WE BUILD IT OURSELVES rather than pulling infisical/agent-vault:
+#
+#  1. It is the credential broker. Everything the town's agents can no longer
+#     leak is inside it, which makes an unattended upstream image the single
+#     worst thing in the fleet to take on trust.
+#  2. Upstream is marked Preview and says its API is subject to change. The
+#     deployment posts to /v1/credentials on a schedule; we want to choose when
+#     that contract moves.
+#  3. POSTHOG_API_KEY is deliberately not passed below. The Dockerfile bakes it
+#     into the binary at build time, so leaving it empty means this build has no
+#     telemetry key to phone home WITH — a structural guarantee rather than the
+#     AGENT_VAULT_TELEMETRY=false env var the deployment also sets.
+#
+# Upstream's own ci.yml still runs on this fork's main. That is deliberate: it
+# is the check that tells us whether a patch we carry broke their tests.
+name: publish-image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Prefer the self-hosted fleet-gtr pool; fall back to Depot when the fleet
+  # heartbeat says it can't host the job. Never hardcode a pool here.
+  route:
+    uses: stigenai/infra-blocks/.github/workflows/route-runner.yml@main
+    with:
+      # 2 | 8 | 16 are the only sizes it maps. An npm frontend build plus a Go
+      # build wants the middle one.
+      size: "8"
+
+  build:
+    needs: route
+    runs-on: ${{ needs.route.outputs.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Unshallow: the version stamp below is `git describe`, which needs
+          # the upstream tags to say anything more useful than a bare sha.
+          fetch-depth: 0
+      - name: Stamp version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          # e.g. v0.39.1-4-gdeadbee when we carry four commits past a release,
+          # which is exactly the fact worth having in `agent-vault version`.
+          echo "version=$(git describe --tags --always)" >>"$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_OUTPUT"
+      # Only the runtime stage is emulated — one `apk add ca-certificates` and
+      # an adduser. Both build stages are pinned to BUILDPLATFORM and the Go
+      # binary is cross-compiled, so QEMU never sees npm or the compiler.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          # Both, so the same pinned digest is schedulable on the amd64 gtr
+          # nodes and on arm64 hosts. Pushing two platforms publishes an OCI
+          # index; the digest the deployment pins is that index, and the
+          # kubelet picks the right child manifest per node.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+          cache-from: type=registry,ref=ghcr.io/stigenai/agent-vault:buildcache
+          cache-to: type=registry,ref=ghcr.io/stigenai/agent-vault:buildcache,mode=max
+          # Immutable source tag only. Deployments pin the digest, so there is
+          # deliberately no mutable `latest` for a manifest to drift against.
+          tags: ghcr.io/stigenai/agent-vault:sha-${{ github.sha }}
+      - name: Report the digest to pin
+        shell: bash
+        run: |
+          {
+            echo "### Agent Vault image"
+            echo
+            echo '```'
+            echo "  - name: ghcr.io/stigenai/agent-vault"
+            echo "    digest: ${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Version stamp: \`${{ steps.meta.outputs.version }}\`"
+          } >>"$GITHUB_STEP_SUMMARY"
