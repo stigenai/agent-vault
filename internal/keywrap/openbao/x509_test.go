@@ -78,7 +78,7 @@ func TestX509TokenSourceUsesRotatingClientCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	source.rotate(second)
-	tokens.client.Transport.(*http.Transport).CloseIdleConnections()
+	tokens.CloseIdleConnections()
 	if _, err := tokens.Token(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestX509TokenSourceUsesRotatingClientCertificate(t *testing.T) {
 	}
 	revoked = true
 	mu.Unlock()
-	tokens.client.Transport.(*http.Transport).CloseIdleConnections()
+	tokens.CloseIdleConnections()
 	if _, err := tokens.Token(context.Background()); err == nil {
 		t.Fatal("revoked OpenBao certificate access was accepted")
 	}

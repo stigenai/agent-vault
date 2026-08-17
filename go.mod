@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/fatih/color v1.19.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/infisical/go-sdk v0.8.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jedib0t/go-pretty/v6 v6.8.2
@@ -62,7 +63,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-resty/resty/v2 v2.13.1 // indirect
