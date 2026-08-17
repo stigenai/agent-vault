@@ -1,0 +1,319 @@
+// Package config loads and validates Agent Vault runtime configuration.
+package config
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+)
+
+const (
+	// SchemaVersion is the only runtime TOML schema understood by this binary.
+	SchemaVersion = 1
+	// DefaultPath is consulted when neither --config nor AGENT_VAULT_CONFIG is set.
+	DefaultPath = "/etc/agent-vault/server.toml"
+)
+
+// Source identifies the winning configuration layer for a field.
+type Source string
+
+const (
+	SourceDefault     Source = "default"
+	SourceTOML        Source = "toml"
+	SourceEnvironment Source = "environment"
+	SourceFlag        Source = "flag"
+)
+
+// Duration is a TOML-friendly time.Duration.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalText(text []byte) error {
+	v, err := time.ParseDuration(string(text))
+	if err != nil {
+		return err
+	}
+	*d = Duration(v)
+	return nil
+}
+
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// Runtime is the fully resolved, validated runtime configuration.
+type Runtime struct {
+	SchemaVersion int
+	Server        Server
+	Database      Database
+	Proxy         Proxy
+	Client        Client
+	Logs          Logs
+	RateLimit     RateLimit
+	Telemetry     Telemetry
+}
+
+type Server struct {
+	Host            string
+	Port            int
+	ProxyPort       int
+	ExternalAddress string
+	LogLevel        string
+	Detach          bool
+}
+
+type Database struct {
+	URL             string
+	SQLitePath      string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+type Proxy struct {
+	MaxRequestBytes    int64
+	MaxResponseBytes   int64
+	AllowPrivateRanges bool
+	NetworkAllowlist   []string
+	TrustedProxies     []string
+}
+
+type Client struct {
+	Address      string
+	Vault        string
+	WorkloadAPI  string
+	TrustDomains []string
+}
+
+type Logs struct {
+	MaxAge          time.Duration
+	MaxRowsPerVault int64
+	RetentionLocked bool
+}
+
+type RateLimit struct {
+	Profile string
+	Locked  bool
+}
+
+type Telemetry struct {
+	Enabled bool
+}
+
+// Partial represents values supplied by one configuration layer. Pointers
+// distinguish an explicit zero value from an omitted value.
+type Partial struct {
+	SchemaVersion *int             `toml:"schema_version"`
+	Server        PartialServer    `toml:"server"`
+	Database      PartialDatabase  `toml:"database"`
+	Proxy         PartialProxy     `toml:"proxy"`
+	Client        PartialClient    `toml:"client"`
+	Logs          PartialLogs      `toml:"logs"`
+	RateLimit     PartialRateLimit `toml:"rate_limit"`
+	Telemetry     PartialTelemetry `toml:"telemetry"`
+}
+
+type PartialServer struct {
+	Host            *string `toml:"host"`
+	Port            *int    `toml:"port"`
+	ProxyPort       *int    `toml:"proxy_port"`
+	ExternalAddress *string `toml:"external_address"`
+	LogLevel        *string `toml:"log_level"`
+	Detach          *bool   `toml:"detach"`
+}
+
+type PartialDatabase struct {
+	URL             *string   `toml:"url"`
+	SQLitePath      *string   `toml:"sqlite_path"`
+	MaxOpenConns    *int      `toml:"max_open_conns"`
+	MaxIdleConns    *int      `toml:"max_idle_conns"`
+	ConnMaxLifetime *Duration `toml:"conn_max_lifetime"`
+}
+
+type PartialProxy struct {
+	MaxRequestBytes    *int64    `toml:"max_request_bytes"`
+	MaxResponseBytes   *int64    `toml:"max_response_bytes"`
+	AllowPrivateRanges *bool     `toml:"allow_private_ranges"`
+	NetworkAllowlist   *[]string `toml:"network_allowlist"`
+	TrustedProxies     *[]string `toml:"trusted_proxies"`
+}
+
+type PartialClient struct {
+	Address      *string   `toml:"address"`
+	Vault        *string   `toml:"vault"`
+	WorkloadAPI  *string   `toml:"workload_api"`
+	TrustDomains *[]string `toml:"trust_domains"`
+}
+
+type PartialLogs struct {
+	MaxAge          *Duration `toml:"max_age"`
+	MaxRowsPerVault *int64    `toml:"max_rows_per_vault"`
+	RetentionLocked *bool     `toml:"retention_locked"`
+}
+
+type PartialRateLimit struct {
+	Profile *string `toml:"profile"`
+	Locked  *bool   `toml:"locked"`
+}
+
+type PartialTelemetry struct {
+	Enabled *bool `toml:"enabled"`
+}
+
+// Result includes the effective configuration and source of every field.
+type Result struct {
+	Config  Runtime
+	Sources map[string]Source
+	Path    string
+}
+
+// Defaults returns the built-in configuration without consulting the process
+// environment or filesystem.
+func Defaults() Runtime {
+	return Runtime{
+		SchemaVersion: SchemaVersion,
+		Server: Server{
+			Host:      "127.0.0.1",
+			Port:      14321,
+			ProxyPort: 14322,
+			LogLevel:  "info",
+		},
+		Database: Database{
+			MaxOpenConns:    25,
+			MaxIdleConns:    10,
+			ConnMaxLifetime: 5 * time.Minute,
+		},
+		Proxy: Proxy{
+			MaxRequestBytes: 1 << 30,
+		},
+		Client: Client{
+			Address: "http://127.0.0.1:14321",
+		},
+		Logs: Logs{
+			MaxAge:          7 * 24 * time.Hour,
+			MaxRowsPerVault: 10000,
+		},
+		RateLimit: RateLimit{Profile: "default"},
+		Telemetry: Telemetry{Enabled: true},
+	}
+}
+
+var fieldNames = []string{
+	"schema_version",
+	"server.host", "server.port", "server.proxy_port", "server.external_address", "server.log_level", "server.detach",
+	"database.url", "database.sqlite_path", "database.max_open_conns", "database.max_idle_conns", "database.conn_max_lifetime",
+	"proxy.max_request_bytes", "proxy.max_response_bytes", "proxy.allow_private_ranges", "proxy.network_allowlist", "proxy.trusted_proxies",
+	"client.address", "client.vault", "client.workload_api", "client.trust_domains",
+	"logs.max_age", "logs.max_rows_per_vault", "logs.retention_locked",
+	"rate_limit.profile", "rate_limit.locked",
+	"telemetry.enabled",
+}
+
+func defaultSources() map[string]Source {
+	sources := make(map[string]Source, len(fieldNames))
+	for _, name := range fieldNames {
+		sources[name] = SourceDefault
+	}
+	return sources
+}
+
+// Validate rejects configurations that cannot start safely or whose meaning is
+// ambiguous. Errors name the stable TOML field path.
+func (c Runtime) Validate() error {
+	if c.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("schema_version: unsupported version %d (supported: %d)", c.SchemaVersion, SchemaVersion)
+	}
+	if strings.TrimSpace(c.Server.Host) == "" {
+		return fmt.Errorf("server.host: must not be empty")
+	}
+	if err := validPort("server.port", c.Server.Port, false); err != nil {
+		return err
+	}
+	if err := validPort("server.proxy_port", c.Server.ProxyPort, true); err != nil {
+		return err
+	}
+	if c.Server.LogLevel != "info" && c.Server.LogLevel != "debug" {
+		return fmt.Errorf("server.log_level: must be info or debug")
+	}
+	if err := validHTTPURL("server.external_address", c.Server.ExternalAddress, true); err != nil {
+		return err
+	}
+	if c.Database.URL != "" && c.Database.SQLitePath != "" {
+		return fmt.Errorf("database: url and sqlite_path are mutually exclusive")
+	}
+	if c.Database.MaxOpenConns < 0 {
+		return fmt.Errorf("database.max_open_conns: must be at least 0")
+	}
+	if c.Database.MaxIdleConns < 0 {
+		return fmt.Errorf("database.max_idle_conns: must be at least 0")
+	}
+	if c.Database.MaxOpenConns > 0 && c.Database.MaxIdleConns > c.Database.MaxOpenConns {
+		return fmt.Errorf("database.max_idle_conns: must not exceed max_open_conns")
+	}
+	if c.Database.ConnMaxLifetime <= 0 {
+		return fmt.Errorf("database.conn_max_lifetime: must be greater than 0")
+	}
+	if c.Proxy.MaxRequestBytes <= 0 {
+		return fmt.Errorf("proxy.max_request_bytes: must be greater than 0")
+	}
+	if c.Proxy.MaxResponseBytes < 0 {
+		return fmt.Errorf("proxy.max_response_bytes: must be at least 0")
+	}
+	if err := validList("proxy.network_allowlist", c.Proxy.NetworkAllowlist); err != nil {
+		return err
+	}
+	if err := validList("proxy.trusted_proxies", c.Proxy.TrustedProxies); err != nil {
+		return err
+	}
+	if err := validHTTPURL("client.address", c.Client.Address, false); err != nil {
+		return err
+	}
+	if c.Client.WorkloadAPI != "" && !strings.HasPrefix(c.Client.WorkloadAPI, "unix://") {
+		return fmt.Errorf("client.workload_api: must use unix://")
+	}
+	for _, trustDomain := range c.Client.TrustDomains {
+		if !strings.HasPrefix(trustDomain, "spiffe://") {
+			return fmt.Errorf("client.trust_domains: %q must use spiffe://", trustDomain)
+		}
+	}
+	if c.Logs.MaxAge < 0 {
+		return fmt.Errorf("logs.max_age: must be at least 0")
+	}
+	if c.Logs.MaxRowsPerVault < 0 {
+		return fmt.Errorf("logs.max_rows_per_vault: must be at least 0")
+	}
+	switch c.RateLimit.Profile {
+	case "default", "strict", "loose", "off":
+	default:
+		return fmt.Errorf("rate_limit.profile: must be default, strict, loose, or off")
+	}
+	return nil
+}
+
+func validPort(name string, port int, allowZero bool) error {
+	if allowZero && port == 0 {
+		return nil
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s: must be between 1 and 65535", name)
+	}
+	return nil
+}
+
+func validHTTPURL(name, raw string, optional bool) error {
+	if raw == "" && optional {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s: must be an absolute http or https URL", name)
+	}
+	return nil
+}
+
+func validList(name string, values []string) error {
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s: entries must not be empty", name)
+		}
+	}
+	return nil
+}
