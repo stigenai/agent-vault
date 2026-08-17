@@ -61,6 +61,7 @@ type Proxy struct {
 	maxResponseBytes int64               // 0 = unlimited
 	maxRequestBytes  int64
 	tlsConfig        *tls.Config
+	spiffeOnly       bool
 }
 
 // Options carries the dependencies a Proxy needs. BaseURL is the
@@ -73,6 +74,7 @@ type Options struct {
 	Peers                   brokercore.AgentResolver
 	Agents                  workloadidentity.AgentLookup
 	TLSConfig               *tls.Config
+	SPIFFEOnly              bool
 	CA                      ca.Provider
 	Sessions                brokercore.SessionResolver
 	Credentials             brokercore.CredentialProvider
@@ -128,6 +130,7 @@ func New(addr string, opts Options) *Proxy {
 		maxResponseBytes: opts.MaxResponseBytes, // 0 = unlimited
 		maxRequestBytes:  maxReq,
 		tlsConfig:        opts.TLSConfig,
+		spiffeOnly:       opts.SPIFFEOnly,
 	}
 
 	p.httpServer = &http.Server{
@@ -188,6 +191,9 @@ func (p *Proxy) authenticateRequest(r *http.Request) (*brokercore.ProxyScope, er
 			return nil, brokercore.ErrInvalidSession
 		}
 		return p.peers.ResolveAgentForProxy(r.Context(), agent.ID, r.Header.Get("X-Vault"))
+	}
+	if p.spiffeOnly {
+		return nil, brokercore.ErrInvalidSession
 	}
 
 	token, hint, err := brokercore.ParseProxyAuth(r)

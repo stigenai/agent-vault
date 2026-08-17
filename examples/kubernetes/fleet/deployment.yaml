@@ -22,10 +22,11 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/agent-vault, readOnly: true}
             - {name: secrets, mountPath: /var/run/secrets/agent-vault, readOnly: true}
+            - {name: spire-agent-socket, mountPath: /run/spire/sockets, readOnly: true}
           readinessProbe:
-            httpGet: {path: /health, port: api}
+            httpGet: {path: /health, port: api, scheme: HTTPS}
           livenessProbe:
-            httpGet: {path: /health, port: api}
+            httpGet: {path: /health, port: api, scheme: HTTPS}
       volumes:
         - name: config
           configMap:
@@ -36,3 +37,7 @@ spec:
             items:
               - {key: database-url, path: database-url}
               - {key: master-password, path: master-password}
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory

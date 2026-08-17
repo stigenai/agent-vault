@@ -34,6 +34,12 @@ allow_private_ranges = true
 network_allowlist = ["10.0.0.0/8"]
 trusted_proxies = ["192.0.2.1"]
 
+[auth]
+mode = "spiffe"
+workload_api = "unix:///toml/auth-spire.sock"
+trust_domains = ["spiffe://toml.example"]
+bootstrap_owner_ids = ["spiffe://toml.example/ns/vault/sa/owner"]
+
 [client]
 address = "https://client.toml.example"
 vault = "toml-vault"
@@ -72,6 +78,7 @@ func TestDefaults(t *testing.T) {
 		Server:        Server{Host: "127.0.0.1", Port: 14321, ProxyPort: 14322, LogLevel: "info"},
 		Database:      Database{MaxOpenConns: 25, MaxIdleConns: 10, ConnMaxLifetime: 5 * time.Minute},
 		Proxy:         Proxy{MaxRequestBytes: 1 << 30},
+		Auth:          Auth{Mode: "legacy"},
 		Client:        Client{Address: "http://127.0.0.1:14321"},
 		SMTP:          SMTP{Port: 587, FromName: "Agent Vault", TLSMode: "opportunistic"},
 		Logs:          Logs{MaxAge: 7 * 24 * time.Hour, MaxRowsPerVault: 10000},
@@ -112,6 +119,12 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 		Proxy: Proxy{
 			MaxRequestBytes: 2000, MaxResponseBytes: 1000, AllowPrivateRanges: true,
 			NetworkAllowlist: []string{"10.0.0.0/8"}, TrustedProxies: []string{"192.0.2.1"},
+		},
+		Auth: Auth{
+			Mode:              "spiffe",
+			WorkloadAPI:       "unix:///toml/auth-spire.sock",
+			TrustDomains:      []string{"spiffe://toml.example"},
+			BootstrapOwnerIDs: []string{"spiffe://toml.example/ns/vault/sa/owner"},
 		},
 		Client: Client{
 			Address: "https://client.toml.example", Vault: "toml-vault",
@@ -155,8 +168,12 @@ func TestLoadPrecedenceEveryField(t *testing.T) {
 		"DB_MAX_OPEN_CONNS": "50", "DB_MAX_IDLE_CONNS": "30", "DB_CONN_MAX_LIFETIME": "20m",
 		"AGENT_VAULT_MAX_REQUEST_BYTES": "3000", "AGENT_VAULT_MAX_RESPONSE_BYTES": "1500",
 		"AGENT_VAULT_ALLOW_PRIVATE_RANGES": "false", "AGENT_VAULT_NETWORK_ALLOWLIST": "172.16.0.0/12",
-		"AGENT_VAULT_TRUSTED_PROXIES": "198.51.100.1",
-		"AGENT_VAULT_VAULT":           "env-vault", "SPIFFE_ENDPOINT_SOCKET": "unix:///env/spire.sock",
+		"AGENT_VAULT_TRUSTED_PROXIES":     "198.51.100.1",
+		"AGENT_VAULT_AUTH_MODE":           "spiffe",
+		"AGENT_VAULT_AUTH_WORKLOAD_API":   "unix:///env/auth-spire.sock",
+		"AGENT_VAULT_AUTH_TRUST_DOMAINS":  "spiffe://env.example",
+		"AGENT_VAULT_BOOTSTRAP_OWNER_IDS": "spiffe://env.example/ns/vault/sa/owner",
+		"AGENT_VAULT_VAULT":               "env-vault", "SPIFFE_ENDPOINT_SOCKET": "unix:///env/spire.sock",
 		"AGENT_VAULT_SPIFFE_TRUST_DOMAINS": "spiffe://env.example",
 		"AGENT_VAULT_MASTER_PASSWORD":      "env-master-password", "AGENT_VAULT_SMTP_PASSWORD": "env-smtp-password",
 		"AGENT_VAULT_SMTP_HOST": "smtp.env.example", "AGENT_VAULT_SMTP_PORT": "3587",
@@ -299,6 +316,11 @@ func TestValidationErrors(t *testing.T) {
 		{"zero request bytes", "[proxy]\nmax_request_bytes=0", "proxy.max_request_bytes"},
 		{"negative response bytes", "[proxy]\nmax_response_bytes=-1", "proxy.max_response_bytes"},
 		{"empty allowlist entry", "[proxy]\nnetwork_allowlist=[\"\"]", "proxy.network_allowlist"},
+		{"bad auth mode", "[auth]\nmode=\"password\"", "auth.mode"},
+		{"hybrid missing socket", "[auth]\nmode=\"hybrid\"", "auth.workload_api"},
+		{"SPIFFE requires HTTPS address", "[auth]\nmode=\"hybrid\"\nworkload_api=\"unix:///spire.sock\"\ntrust_domains=[\"spiffe://cluster.example\"]", "server.external_address"},
+		{"bootstrap in hybrid", "[auth]\nmode=\"hybrid\"\nworkload_api=\"unix:///spire.sock\"\ntrust_domains=[\"spiffe://cluster.example\"]\nbootstrap_owner_ids=[\"spiffe://cluster.example/owner\"]", "auth.bootstrap_owner_ids"},
+		{"owner outside trust domain", "[auth]\nmode=\"spiffe\"\nworkload_api=\"unix:///spire.sock\"\ntrust_domains=[\"spiffe://cluster.example\"]\nbootstrap_owner_ids=[\"spiffe://other.example/owner\"]", "outside configured trust domains"},
 		{"bad client URL", "[client]\naddress=\"relative\"", "client.address"},
 		{"bad workload socket", "[client]\nworkload_api=\"tcp://spire\"", "client.workload_api"},
 		{"bad trust domain", "[client]\ntrust_domains=[\"https://example\"]", "client.trust_domains"},
@@ -351,6 +373,9 @@ func allFlagOverrides() Partial {
 	lifetime := Duration(30 * time.Minute)
 	requestBytes, responseBytes, private := int64(4000), int64(2500), true
 	allowlist, proxies := []string{"10.10.0.0/16"}, []string{"203.0.113.1"}
+	authMode, authSocket := "spiffe", "unix:///flag/auth-spire.sock"
+	authDomains := []string{"spiffe://flag.example"}
+	bootstrapOwners := []string{"spiffe://flag.example/ns/vault/sa/owner"}
 	address, vault, socket := "https://flag-client.example", "flag-vault", "unix:///flag/spire.sock"
 	trustDomains := []string{"spiffe://flag.example"}
 	maxAge, rows, retention := Duration(96*time.Hour), int64(40000), true
@@ -360,6 +385,7 @@ func allFlagOverrides() Partial {
 		Server:        PartialServer{Host: &host, Port: &port, ProxyPort: &proxyPort, ExternalAddress: &external, LogLevel: &level, Detach: &detach},
 		Database:      PartialDatabase{URL: &dbURL, SQLitePath: &sqlitePath, MaxOpenConns: &open, MaxIdleConns: &idle, ConnMaxLifetime: &lifetime},
 		Proxy:         PartialProxy{MaxRequestBytes: &requestBytes, MaxResponseBytes: &responseBytes, AllowPrivateRanges: &private, NetworkAllowlist: &allowlist, TrustedProxies: &proxies},
+		Auth:          PartialAuth{Mode: &authMode, WorkloadAPI: &authSocket, TrustDomains: &authDomains, BootstrapOwnerIDs: &bootstrapOwners},
 		Client:        PartialClient{Address: &address, Vault: &vault, WorkloadAPI: &socket, TrustDomains: &trustDomains},
 		Encryption:    PartialEncryption{LegacyMasterPassword: &masterPassword},
 		SMTP: PartialSMTP{
@@ -378,6 +404,7 @@ func flagRuntime() Runtime {
 		Server:        Server{Host: "flag-host", Port: 44321, ProxyPort: 44322, ExternalAddress: "https://flag.example", LogLevel: "debug", Detach: true},
 		Database:      Database{URL: secretValue("env://FLAG_DATABASE_URL", "postgres://flag/db"), MaxOpenConns: 60, MaxIdleConns: 40, ConnMaxLifetime: 30 * time.Minute},
 		Proxy:         Proxy{MaxRequestBytes: 4000, MaxResponseBytes: 2500, AllowPrivateRanges: true, NetworkAllowlist: []string{"10.10.0.0/16"}, TrustedProxies: []string{"203.0.113.1"}},
+		Auth:          Auth{Mode: "spiffe", WorkloadAPI: "unix:///flag/auth-spire.sock", TrustDomains: []string{"spiffe://flag.example"}, BootstrapOwnerIDs: []string{"spiffe://flag.example/ns/vault/sa/owner"}},
 		Client:        Client{Address: "https://flag-client.example", Vault: "flag-vault", WorkloadAPI: "unix:///flag/spire.sock", TrustDomains: []string{"spiffe://flag.example"}},
 		Encryption:    Encryption{LegacyMasterPassword: secretValue("env://FLAG_MASTER_PASSWORD", "flag-master-password")},
 		SMTP: SMTP{

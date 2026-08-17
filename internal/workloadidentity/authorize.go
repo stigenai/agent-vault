@@ -60,7 +60,10 @@ func AuthorizeAgents(lookup AgentLookup, trustDomains ...spiffeid.TrustDomain) t
 // The lookup is repeated per request so revocation also takes effect on reused
 // HTTP connections, not only at the next TLS handshake.
 func AgentFromTLS(ctx context.Context, state *tls.ConnectionState, lookup AgentLookup) (*store.Agent, error) {
-	if lookup == nil || state == nil || !state.HandshakeComplete || len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+	// go-spiffe performs chain verification in VerifyPeerCertificate, so
+	// ConnectionState.VerifiedChains is not populated by crypto/tls. A request
+	// reaches this function only after that listener callback succeeds.
+	if lookup == nil || state == nil || !state.HandshakeComplete || len(state.PeerCertificates) == 0 {
 		return nil, fmt.Errorf("verified SPIFFE client certificate required")
 	}
 	id, err := x509svid.IDFromCert(state.PeerCertificates[0])

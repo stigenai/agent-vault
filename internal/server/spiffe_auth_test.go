@@ -76,6 +76,24 @@ func TestRequireAuthMapsVerifiedSPIFFEPeerAndResistsDowngrade(t *testing.T) {
 	if rr.Code != http.StatusNoContent || actorID != "legacy-agent" {
 		t.Fatalf("legacy bearer: status=%d actor=%q", rr.Code, actorID)
 	}
+
+	srv.authMode = "spiffe"
+	req = httptest.NewRequest(http.MethodGet, "/discover", nil)
+	req.Header.Set("Authorization", "Bearer legacy")
+	rr = httptest.NewRecorder()
+	handler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("SPIFFE-only bearer status = %d", rr.Code)
+	}
+
+	for _, route := range []string{"/v1/auth/login", "/v1/auth/forgot-password", "/v1/sessions", "/v1/users/invites"} {
+		req = httptest.NewRequest(http.MethodPost, route, nil)
+		rr = httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("SPIFFE-only legacy route %s status = %d", route, rr.Code)
+		}
+	}
 }
 
 func spiffeTestCertificate(t *testing.T, rawID string) *x509.Certificate {

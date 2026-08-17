@@ -21,6 +21,12 @@ allow_private_ranges = false
 network_allowlist = []
 trusted_proxies = ["10.0.0.0/8"]
 
+[auth]
+mode = "spiffe"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+bootstrap_owner_ids = ["spiffe://cluster.example/ns/agent-vault/sa/agent-vault-reconciler"]
+
 [client]
 address = "https://agent-vault.agent-vault.svc.cluster.local"
 workload_api = "unix:///run/spire/sockets/agent.sock"

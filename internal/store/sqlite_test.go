@@ -1712,6 +1712,122 @@ func TestCreateAgent(t *testing.T) {
 	}
 }
 
+func TestBootstrapSPIFFEOwnersIsAtomicAndOneTime(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	sets := [][]string{
+		{"spiffe://cluster.example/owner/a", "spiffe://cluster.example/owner/b"},
+		{"spiffe://cluster.example/owner/x", "spiffe://cluster.example/owner/y"},
+	}
+	type result struct {
+		value SPIFFEOwnerBootstrap
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(sets))
+	for _, ids := range sets {
+		ids := ids
+		go func() {
+			<-start
+			value, err := s.BootstrapSPIFFEOwners(ctx, ids)
+			results <- result{value: value, err: err}
+		}()
+	}
+	close(start)
+	var got []result
+	for range sets {
+		got = append(got, <-results)
+	}
+	applied := 0
+	var winner []string
+	for _, item := range got {
+		if item.err != nil {
+			t.Fatal(item.err)
+		}
+		if item.value.Applied {
+			applied++
+			winner = item.value.ConfiguredIDs
+		}
+	}
+	if applied != 1 {
+		t.Fatalf("applied bootstrap calls = %d, want 1; results=%+v", applied, got)
+	}
+	for _, item := range got {
+		if strings.Join(item.value.ConfiguredIDs, "\n") != strings.Join(winner, "\n") {
+			t.Fatalf("replicas observed inconsistent owner sets: winner=%v result=%v", winner, item.value.ConfiguredIDs)
+		}
+	}
+
+	agents, err := s.ListAllAgents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != len(winner) {
+		t.Fatalf("agents = %d, want %d", len(agents), len(winner))
+	}
+	seen := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		seen[agent.SPIFFEID] = true
+		if agent.Role != "owner" || agent.Status != "active" {
+			t.Fatalf("bootstrapped agent = %+v", agent)
+		}
+		if tokens, err := s.CountAgentTokens(ctx, agent.ID); err != nil || tokens != 0 {
+			t.Fatalf("durable tokens for %s = %d, %v", agent.SPIFFEID, tokens, err)
+		}
+	}
+	for _, id := range winner {
+		if !seen[id] {
+			t.Fatalf("winning owner %q missing", id)
+		}
+	}
+
+	later, err := s.BootstrapSPIFFEOwners(ctx, []string{"spiffe://cluster.example/owner/later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.Applied {
+		t.Fatalf("later configuration replayed bootstrap: %+v", later)
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, "spiffe://cluster.example/owner/later"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("later owner was created: %v", err)
+	}
+}
+
+func TestBootstrapSPIFFEOwnersDoesNotAugmentExistingOwnerSet(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	vault, err := s.GetVault(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.RegisterFirstUser(ctx, "owner@example.com", []byte("hash"), []byte("salt"), vault.ID, 3, 65536, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const configured = "spiffe://cluster.example/owner/new"
+	result, err := s.BootstrapSPIFFEOwners(ctx, []string{configured})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || result.OwnerCount != 1 || result.SPIFFEOwners != 0 {
+		t.Fatalf("bootstrap with existing owner = %+v", result)
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, configured); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("bootstrap augmented existing owner set: %v", err)
+	}
+
+	if err := s.DeleteUser(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.BootstrapSPIFFEOwners(ctx, []string{configured})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || result.OwnerCount != 0 {
+		t.Fatalf("consumed bootstrap replayed after owner deletion: %+v", result)
+	}
+}
+
 func TestCreateAgentWithGrantsAndToken(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()

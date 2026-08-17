@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -3198,6 +3199,90 @@ func (s *SQLStore) CountAllOwners(ctx context.Context) (int, error) {
 		s.dialect.BoolVal(true),
 	).Scan(&count)
 	return count, err
+}
+
+const spiffeOwnerBootstrapSetting = "auth.spiffe_owner_bootstrap.v1"
+
+// BootstrapSPIFFEOwners atomically claims the one-time bootstrap marker and,
+// only when no active owner already exists, creates the complete configured
+// owner set without durable bearer tokens. A later configuration change can
+// observe the original set but can never add owners through bootstrap.
+func (s *SQLStore) BootstrapSPIFFEOwners(ctx context.Context, spiffeIDs []string) (SPIFFEOwnerBootstrap, error) {
+	ids := append([]string(nil), spiffeIDs...)
+	sort.Strings(ids)
+	for i := 1; i < len(ids); i++ {
+		if ids[i] == ids[i-1] {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("duplicate SPIFFE owner ID %q", ids[i])
+		}
+	}
+	payload, err := json.Marshal(ids)
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("encode SPIFFE owner bootstrap: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("begin SPIFFE owner bootstrap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := s.now()
+	res, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO instance_settings (key, value, updated_at)
+		VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING`), spiffeOwnerBootstrapSetting, string(payload), now)
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("claim SPIFFE owner bootstrap: %w", err)
+	}
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("inspect SPIFFE owner bootstrap claim: %w", err)
+	}
+
+	configured := ids
+	if claimed == 0 {
+		var stored string
+		if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT value FROM instance_settings WHERE key = ?`), spiffeOwnerBootstrapSetting).Scan(&stored); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("read SPIFFE owner bootstrap claim: %w", err)
+		}
+		if err := json.Unmarshal([]byte(stored), &configured); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("decode SPIFFE owner bootstrap claim: %w", err)
+		}
+	}
+
+	var owners, spiffeOwners int
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT
+		(SELECT COUNT(*) FROM users WHERE role = 'owner' AND is_active = ?) +
+		(SELECT COUNT(*) FROM agents WHERE role = 'owner' AND status = 'active'),
+		(SELECT COUNT(*) FROM agents WHERE role = 'owner' AND status = 'active' AND spiffe_id IS NOT NULL)`), s.dialect.BoolVal(true)).Scan(&owners, &spiffeOwners); err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("count owners during SPIFFE bootstrap: %w", err)
+	}
+	if claimed == 0 || owners > 0 {
+		if err := tx.Commit(); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("finish SPIFFE owner bootstrap check: %w", err)
+		}
+		return SPIFFEOwnerBootstrap{ConfiguredIDs: configured, OwnerCount: owners, SPIFFEOwners: spiffeOwners}, nil
+	}
+
+	var defaultVaultID string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT id FROM vaults WHERE name = ?`), "default").Scan(&defaultVaultID); err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("find default vault for SPIFFE owners: %w", err)
+	}
+	for _, spiffeID := range ids {
+		digest := sha256.Sum256([]byte(spiffeID))
+		name := "spiffe-owner-" + hex.EncodeToString(digest[:8])
+		agentID := newUUID()
+		if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO agents
+			(id, name, spiffe_id, role, status, created_by, created_at, updated_at)
+			VALUES (?, ?, ?, 'owner', 'active', 'spiffe-bootstrap', ?, ?)`), agentID, name, spiffeID, now, now); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("create SPIFFE owner %q: %w", spiffeID, err)
+		}
+		if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO vault_grants
+			(actor_id, actor_type, vault_id, role, created_at) VALUES (?, 'agent', ?, 'admin', ?)`), agentID, defaultVaultID, now); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("grant default vault to SPIFFE owner %q: %w", spiffeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("commit SPIFFE owner bootstrap: %w", err)
+	}
+	return SPIFFEOwnerBootstrap{Applied: true, ConfiguredIDs: ids, OwnerCount: len(ids), SPIFFEOwners: len(ids)}, nil
 }
 
 // newUUID generates a v4 UUID using crypto/rand.

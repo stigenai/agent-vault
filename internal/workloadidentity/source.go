@@ -5,6 +5,7 @@ package workloadidentity
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -153,6 +154,29 @@ func (s *Source) ServerTLSConfig(authorizer tlsconfig.Authorizer) (*tls.Config, 
 		return nil, err
 	}
 	return tlsconfig.MTLSServerConfig(s.material, s.material, authorizer), nil
+}
+
+// HybridServerTLSConfig presents the rotating server SVID and validates a
+// client SVID when one is presented, while still allowing legacy clients to
+// authenticate at the HTTP layer. A presented invalid SVID fails the TLS
+// handshake and therefore cannot downgrade to a bearer token.
+func (s *Source) HybridServerTLSConfig(authorizer tlsconfig.Authorizer) (*tls.Config, error) {
+	if authorizer == nil {
+		return nil, fmt.Errorf("SPIFFE peer authorizer is required")
+	}
+	if err := s.Ready(); err != nil {
+		return nil, err
+	}
+	config := tlsconfig.TLSServerConfig(s.material)
+	config.ClientAuth = tls.RequestClientCert
+	verify := tlsconfig.VerifyPeerCertificate(s.material, authorizer)
+	config.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return nil
+		}
+		return verify(rawCerts, verifiedChains)
+	}
+	return config, nil
 }
 
 // Updated signals whenever the Workload API publishes new SVID or bundle

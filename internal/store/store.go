@@ -370,6 +370,15 @@ type AgentVaultGrantSpec struct {
 	Role    string
 }
 
+// SPIFFEOwnerBootstrap records the immutable result of the one-time SPIFFE
+// owner bootstrap claim.
+type SPIFFEOwnerBootstrap struct {
+	Applied       bool
+	ConfiguredIDs []string
+	OwnerCount    int
+	SPIFFEOwners  int
+}
+
 // UserInvite represents an instance-level invitation for a new user.
 // Invites bring users into the instance, with optional vault pre-assignment.
 type UserInvite struct {
@@ -573,6 +582,7 @@ type Store interface {
 	RotateAgentToken(ctx context.Context, agentID string, tokenExpiresAt *time.Time) (*Session, error)
 	CreateAgentToken(ctx context.Context, agentID string, expiresAt *time.Time) (*Session, error)
 	CountAllOwners(ctx context.Context) (int, error)
+	BootstrapSPIFFEOwners(ctx context.Context, spiffeIDs []string) (SPIFFEOwnerBootstrap, error)
 
 	// Instance settings
 	GetSetting(ctx context.Context, key string) (string, error)

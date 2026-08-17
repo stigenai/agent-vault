@@ -62,7 +62,6 @@ func TestAgentFromTLSRequiresVerifiedPeerAndRechecksRevocation(t *testing.T) {
 	state := &tls.ConnectionState{
 		HandshakeComplete: true,
 		PeerCertificates:  svid.Certificates,
-		VerifiedChains:    [][]*x509.Certificate{svid.Certificates},
 	}
 
 	got, err := AgentFromTLS(context.Background(), state, lookup)

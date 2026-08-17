@@ -76,6 +76,19 @@ func TestSourceReadinessIdentityAndRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if serverTLS.ClientAuth != tls.RequireAnyClientCert {
+		t.Fatalf("mTLS ClientAuth = %v", serverTLS.ClientAuth)
+	}
+	hybridTLS, err := source.HybridServerTLSConfig(tlsconfig.AuthorizeAny())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hybridTLS.ClientAuth != tls.RequestClientCert {
+		t.Fatalf("hybrid ClientAuth = %v", hybridTLS.ClientAuth)
+	}
+	if err := hybridTLS.VerifyPeerCertificate(nil, nil); err != nil {
+		t.Fatalf("hybrid listener rejected absent optional certificate: %v", err)
+	}
 	firstServerTLS, err := serverTLS.GetCertificate(&tls.ClientHelloInfo{})
 	if err != nil {
 		t.Fatal(err)

@@ -109,6 +109,7 @@ func resolvedServerOptions(cfg runtimeconfig.Runtime) server.RuntimeOptions {
 		AllowPrivateRanges: cfg.Proxy.AllowPrivateRanges,
 		NetworkAllowlist:   parseNetworkList(cfg.Proxy.NetworkAllowlist, "proxy.network_allowlist"),
 		TrustedProxies:     parseNetworkList(cfg.Proxy.TrustedProxies, "proxy.trusted_proxies"),
+		AuthMode:           cfg.Auth.Mode,
 	}
 }
 

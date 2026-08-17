@@ -85,6 +85,10 @@ All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP add
 | `proxy.allow_private_ranges` | `false` | `AGENT_VAULT_ALLOW_PRIVATE_RANGES` |
 | `proxy.network_allowlist` | `[]` | `AGENT_VAULT_NETWORK_ALLOWLIST` |
 | `proxy.trusted_proxies` | `[]` | `AGENT_VAULT_TRUSTED_PROXIES` |
+| `auth.mode` | `legacy` | `AGENT_VAULT_AUTH_MODE` |
+| `auth.workload_api` | empty | `AGENT_VAULT_AUTH_WORKLOAD_API` |
+| `auth.trust_domains` | `[]` | `AGENT_VAULT_AUTH_TRUST_DOMAINS` |
+| `auth.bootstrap_owner_ids` | `[]` | `AGENT_VAULT_BOOTSTRAP_OWNER_IDS` |
 | `client.address` | `http://127.0.0.1:14321` | `AGENT_VAULT_ADDR` |
 | `client.vault` | empty | `AGENT_VAULT_VAULT` |
 | `client.workload_api` | empty | `SPIFFE_ENDPOINT_SOCKET` |
@@ -106,6 +110,12 @@ All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP add
 | `telemetry.enabled` | `true` | `AGENT_VAULT_TELEMETRY` / `--telemetry` |
 
 Legacy `AGENT_VAULT_RATELIMIT_<TIER>_<KNOB>` variables remain supported for per-tier overrides. They are applied once during startup on top of `rate_limit.profile`; `rate_limit.locked = true` prevents instance-setting overrides.
+
+### SPIFFE authentication modes
+
+`auth.mode` accepts `legacy`, `hybrid`, or `spiffe`. Hybrid mode serves the API over TLS with a rotating SPIRE X.509-SVID, accepts a validated client SVID when present, and retains legacy bearer authentication. SPIFFE mode requires mTLS on both API and proxy listeners and rejects password, invite, and durable-token routes.
+
+In SPIFFE mode, `auth.workload_api` must be an absolute `unix:///` socket, every `auth.trust_domains` entry must be a trust-domain URI such as `spiffe://cluster.example`, and every `auth.bootstrap_owner_ids` entry must be an exact ID in one of those domains. The owner list is claimed transactionally once. Later TOML changes cannot add bootstrap owners; if all bootstrapped owners are removed, startup fails closed instead of replaying bootstrap.
 
 ## Kubernetes fleet example
 

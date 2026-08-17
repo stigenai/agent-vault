@@ -192,8 +192,12 @@ authorization rules.
 
 The first configured bootstrap owner is created only when the database has no
 owner actor. Subsequent changes happen through normal reconciled state. In
-SPIFFE-only mode, absence of a valid peer SVID fails closed and legacy bearer
-tokens and password routes are unavailable.
+SPIFFE-only mode, absence of a valid peer SVID fails closed on protected API
+routes and the proxy listener, and legacy bearer tokens and password routes are
+unavailable. The API may accept a certificate-less TLS handshake for Kubernetes
+health probes, but such a connection cannot pass authorization. Hybrid mode
+enables optional-SVID TLS on the API while retaining the legacy plain proxy
+listener until the fleet switches the proxy to SPIFFE-only.
 
 The relay is the compatibility boundary for arbitrary agents:
 

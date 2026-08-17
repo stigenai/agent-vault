@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 const (
@@ -46,6 +48,7 @@ type Runtime struct {
 	Server        Server
 	Database      Database
 	Proxy         Proxy
+	Auth          Auth
 	Client        Client
 	Encryption    Encryption
 	SMTP          SMTP
@@ -77,6 +80,14 @@ type Proxy struct {
 	AllowPrivateRanges bool
 	NetworkAllowlist   []string
 	TrustedProxies     []string
+}
+
+// Auth controls control-plane and proxy ingress authentication.
+type Auth struct {
+	Mode              string
+	WorkloadAPI       string
+	TrustDomains      []string
+	BootstrapOwnerIDs []string
 }
 
 type Client struct {
@@ -125,6 +136,7 @@ type Partial struct {
 	Server        PartialServer     `toml:"server"`
 	Database      PartialDatabase   `toml:"database"`
 	Proxy         PartialProxy      `toml:"proxy"`
+	Auth          PartialAuth       `toml:"auth"`
 	Client        PartialClient     `toml:"client"`
 	Encryption    PartialEncryption `toml:"encryption"`
 	SMTP          PartialSMTP       `toml:"smtp"`
@@ -156,6 +168,13 @@ type PartialProxy struct {
 	AllowPrivateRanges *bool     `toml:"allow_private_ranges"`
 	NetworkAllowlist   *[]string `toml:"network_allowlist"`
 	TrustedProxies     *[]string `toml:"trusted_proxies"`
+}
+
+type PartialAuth struct {
+	Mode              *string   `toml:"mode"`
+	WorkloadAPI       *string   `toml:"workload_api"`
+	TrustDomains      *[]string `toml:"trust_domains"`
+	BootstrapOwnerIDs *[]string `toml:"bootstrap_owner_ids"`
 }
 
 type PartialClient struct {
@@ -221,6 +240,7 @@ func Defaults() Runtime {
 		Proxy: Proxy{
 			MaxRequestBytes: 1 << 30,
 		},
+		Auth: Auth{Mode: "legacy"},
 		Client: Client{
 			Address: "http://127.0.0.1:14321",
 		},
@@ -243,6 +263,7 @@ var fieldNames = []string{
 	"server.host", "server.port", "server.proxy_port", "server.external_address", "server.log_level", "server.detach",
 	"database.url", "database.sqlite_path", "database.max_open_conns", "database.max_idle_conns", "database.conn_max_lifetime",
 	"proxy.max_request_bytes", "proxy.max_response_bytes", "proxy.allow_private_ranges", "proxy.network_allowlist", "proxy.trusted_proxies",
+	"auth.mode", "auth.workload_api", "auth.trust_domains", "auth.bootstrap_owner_ids",
 	"client.address", "client.vault", "client.workload_api", "client.trust_domains",
 	"encryption.legacy_master_password",
 	"smtp.host", "smtp.port", "smtp.username", "smtp.password", "smtp.from", "smtp.from_name", "smtp.tls_mode", "smtp.tls_skip_verify",
@@ -307,6 +328,12 @@ func (c Runtime) Validate() error {
 	if err := validNetworkList("proxy.trusted_proxies", c.Proxy.TrustedProxies); err != nil {
 		return err
 	}
+	if err := validateAuth(c.Auth); err != nil {
+		return err
+	}
+	if c.Auth.Mode != "legacy" && !strings.HasPrefix(strings.ToLower(c.Server.ExternalAddress), "https://") {
+		return fmt.Errorf("server.external_address: HTTPS URL is required for SPIFFE authentication")
+	}
 	if err := validHTTPURL("client.address", c.Client.Address, false); err != nil {
 		return err
 	}
@@ -338,6 +365,78 @@ func (c Runtime) Validate() error {
 		return fmt.Errorf("rate_limit.profile: must be default, strict, loose, or off")
 	}
 	return nil
+}
+
+func validateAuth(auth Auth) error {
+	switch auth.Mode {
+	case "legacy":
+		if auth.WorkloadAPI != "" || len(auth.TrustDomains) > 0 || len(auth.BootstrapOwnerIDs) > 0 {
+			return fmt.Errorf("auth: SPIFFE settings require mode hybrid or spiffe")
+		}
+		return nil
+	case "hybrid", "spiffe":
+	default:
+		return fmt.Errorf("auth.mode: must be legacy, hybrid, or spiffe")
+	}
+	if !strings.HasPrefix(auth.WorkloadAPI, "unix:///") {
+		return fmt.Errorf("auth.workload_api: must be an absolute unix:// socket")
+	}
+	if len(auth.TrustDomains) == 0 {
+		return fmt.Errorf("auth.trust_domains: at least one trust domain is required")
+	}
+	allowed := make(map[spiffeid.TrustDomain]struct{}, len(auth.TrustDomains))
+	for _, raw := range auth.TrustDomains {
+		domain, err := parseTrustDomain(raw)
+		if err != nil {
+			return fmt.Errorf("auth.trust_domains: %q: %w", raw, err)
+		}
+		if _, exists := allowed[domain]; exists {
+			return fmt.Errorf("auth.trust_domains: duplicate %q", raw)
+		}
+		allowed[domain] = struct{}{}
+	}
+	if auth.Mode == "hybrid" && len(auth.BootstrapOwnerIDs) > 0 {
+		return fmt.Errorf("auth.bootstrap_owner_ids: only valid in spiffe mode")
+	}
+	if auth.Mode == "spiffe" && len(auth.BootstrapOwnerIDs) == 0 {
+		return fmt.Errorf("auth.bootstrap_owner_ids: at least one exact SPIFFE ID is required")
+	}
+	seen := make(map[spiffeid.ID]struct{}, len(auth.BootstrapOwnerIDs))
+	for _, raw := range auth.BootstrapOwnerIDs {
+		id, err := spiffeid.FromString(raw)
+		if err != nil {
+			return fmt.Errorf("auth.bootstrap_owner_ids: %q: %w", raw, err)
+		}
+		if id.String() != raw {
+			return fmt.Errorf("auth.bootstrap_owner_ids: %q must be canonical", raw)
+		}
+		if _, ok := allowed[id.TrustDomain()]; !ok {
+			return fmt.Errorf("auth.bootstrap_owner_ids: %q is outside configured trust domains", raw)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("auth.bootstrap_owner_ids: duplicate %q", raw)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func parseTrustDomain(raw string) (spiffeid.TrustDomain, error) {
+	if !strings.HasPrefix(raw, "spiffe://") {
+		return spiffeid.TrustDomain{}, fmt.Errorf("must use spiffe://")
+	}
+	value := strings.TrimPrefix(raw, "spiffe://")
+	if value == "" || strings.ContainsAny(value, "/?#") {
+		return spiffeid.TrustDomain{}, fmt.Errorf("must identify a trust domain without a path")
+	}
+	domain, err := spiffeid.TrustDomainFromString(value)
+	if err != nil {
+		return spiffeid.TrustDomain{}, err
+	}
+	if "spiffe://"+domain.String() != raw {
+		return spiffeid.TrustDomain{}, fmt.Errorf("must be canonical")
+	}
+	return domain, nil
 }
 
 func validPort(name string, port int, allowZero bool) error {

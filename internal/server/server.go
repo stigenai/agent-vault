@@ -63,6 +63,7 @@ type agentVaultJSON struct {
 type Server struct {
 	httpServer        *http.Server
 	tlsConfig         *tls.Config
+	authMode          string
 	store             Store
 	encKey            []byte // 32-byte encryption key, held in memory while running
 	notifier          *notify.Notifier
@@ -182,6 +183,12 @@ func (s *Server) captureEvent(r *http.Request, event string, actor *Actor, extra
 // SessionResolver returns a brokercore.SessionResolver backed by this
 // server's store.
 func (s *Server) SessionResolver() brokercore.SessionResolver {
+	return brokercore.NewStoreSessionResolver(s.store)
+}
+
+// AgentResolver returns vault-scope resolution for an agent whose transport
+// identity has already been authenticated.
+func (s *Server) AgentResolver() brokercore.AgentResolver {
 	return brokercore.NewStoreSessionResolver(s.store)
 }
 
@@ -780,6 +787,7 @@ type RuntimeOptions struct {
 	// TLSConfig enables TLS on the API listener. SPIFFE deployments supply a
 	// rotating mTLS config from workloadidentity.Source.
 	TLSConfig *tls.Config
+	AuthMode  string
 }
 
 func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
@@ -796,6 +804,9 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 // NewWithRuntime constructs a server exclusively from resolved inputs. New
 // remains as an environment-compatible wrapper for embedders.
 func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger, opts RuntimeOptions) *Server {
+	if opts.AuthMode == "" {
+		opts.AuthMode = "legacy"
+	}
 	mux := http.NewServeMux()
 	rl := ratelimit.New(opts.RateLimit)
 
@@ -819,6 +830,7 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 		rateLimitEnvMasks: opts.RateLimitEnvMasks,
 		trustedProxyCIDRs: append([]net.IPNet(nil), opts.TrustedProxies...),
 		tlsConfig:         opts.TLSConfig,
+		authMode:          opts.AuthMode,
 		logSink:           requestlog.Nop{},
 		oauthRefresher:    oauth.NewRefresher(),
 	}
@@ -835,24 +847,24 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	// server-wide TierGlobal backstop; no per-route limit is useful.
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	mux.HandleFunc("POST /v1/auth/register", ipAuth(limitBody(s.handleRegister)))
-	mux.HandleFunc("POST /v1/auth/verify", ipAuth(limitBody(s.handleVerify)))
-	mux.HandleFunc("POST /v1/auth/resend-verification", ipAuth(limitBody(s.handleResendVerification)))
-	mux.HandleFunc("POST /v1/auth/forgot-password", ipAuth(limitBody(s.handleForgotPassword)))
-	mux.HandleFunc("POST /v1/auth/reset-password", ipAuth(limitBody(s.handleResetPassword)))
+	mux.HandleFunc("POST /v1/auth/register", s.requireLegacyAuth(ipAuth(limitBody(s.handleRegister))))
+	mux.HandleFunc("POST /v1/auth/verify", s.requireLegacyAuth(ipAuth(limitBody(s.handleVerify))))
+	mux.HandleFunc("POST /v1/auth/resend-verification", s.requireLegacyAuth(ipAuth(limitBody(s.handleResendVerification))))
+	mux.HandleFunc("POST /v1/auth/forgot-password", s.requireLegacyAuth(ipAuth(limitBody(s.handleForgotPassword))))
+	mux.HandleFunc("POST /v1/auth/reset-password", s.requireLegacyAuth(ipAuth(limitBody(s.handleResetPassword))))
 
 	actorAuthed := s.tier(ratelimit.TierAuthed, s.actorKeyer())
 
 	// Require initialization
 	mux.HandleFunc("GET /v1/auth/me", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAuthMe))))
-	mux.HandleFunc("POST /v1/auth/login", s.requireInitialized(ipAuth(limitBody(s.handleLogin))))
-	mux.HandleFunc("POST /v1/auth/change-password", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleChangePassword)))))
-	mux.HandleFunc("DELETE /v1/auth/account", s.requireInitialized(s.requireAuth(actorAuthed(s.handleDeleteAccount))))
-	mux.HandleFunc("GET /v1/auth/sessions", s.requireInitialized(s.requireAuth(actorAuthed(s.handleListUserSessions))))
-	mux.HandleFunc("DELETE /v1/auth/sessions/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeUserSession))))
-	mux.HandleFunc("POST /v1/sessions", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleScopedSession)))))
-	mux.HandleFunc("GET /v1/sessions", s.requireInitialized(s.requireAuth(actorAuthed(s.handleListScopedSessions))))
-	mux.HandleFunc("DELETE /v1/sessions/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeScopedSession))))
+	mux.HandleFunc("POST /v1/auth/login", s.requireLegacyAuth(s.requireInitialized(ipAuth(limitBody(s.handleLogin)))))
+	mux.HandleFunc("POST /v1/auth/change-password", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleChangePassword))))))
+	mux.HandleFunc("DELETE /v1/auth/account", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleDeleteAccount)))))
+	mux.HandleFunc("GET /v1/auth/sessions", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleListUserSessions)))))
+	mux.HandleFunc("DELETE /v1/auth/sessions/{id}", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeUserSession)))))
+	mux.HandleFunc("POST /v1/sessions", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleScopedSession))))))
+	mux.HandleFunc("GET /v1/sessions", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleListScopedSessions)))))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeScopedSession)))))
 	mux.HandleFunc("GET /v1/credentials", s.requireInitialized(s.requireAuth(actorAuthed(s.handleCredentialsList))))
 	mux.HandleFunc("POST /v1/credentials", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleCredentialsSet)))))
 	mux.HandleFunc("DELETE /v1/credentials", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleCredentialsDelete)))))
@@ -878,12 +890,12 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	}))
 
 	// Agent management (instance-level)
-	mux.HandleFunc("POST /v1/agents", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentCreate)))))
+	mux.HandleFunc("POST /v1/agents", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentCreate))))))
 	mux.HandleFunc("GET /v1/agents", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAgentList))))
 	mux.HandleFunc("GET /v1/agents/{name}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAgentGet))))
 	mux.HandleFunc("DELETE /v1/agents/{name}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAgentRevoke))))
 	mux.HandleFunc("POST /v1/agents/{name}/delete", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentDelete)))))
-	mux.HandleFunc("POST /v1/agents/{name}/rotate", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRotate)))))
+	mux.HandleFunc("POST /v1/agents/{name}/rotate", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRotate))))))
 	mux.HandleFunc("POST /v1/agents/{name}/rename", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRename)))))
 	mux.HandleFunc("PUT /v1/agents/{name}/spiffe-id", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentSetSPIFFEID)))))
 	mux.HandleFunc("POST /v1/agents/{name}/role", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentSetRole)))))
@@ -943,12 +955,12 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("GET /v1/mitm/ca.pem", s.handleMITMCA)
 
 	// Instance-level user invites
-	mux.HandleFunc("POST /v1/users/invites", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteCreate)))))
-	mux.HandleFunc("GET /v1/users/invites", s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteList))))
-	mux.HandleFunc("DELETE /v1/users/invites/{token}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteRevoke))))
-	mux.HandleFunc("POST /v1/users/invites/{token}/reinvite", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteReinvite)))))
-	mux.HandleFunc("GET /v1/users/invites/{token}/details", s.requireInitialized(ipUserInviteToken(s.handleUserInviteDetails)))
-	mux.HandleFunc("POST /v1/users/invites/{token}/accept", s.requireInitialized(ipUserInviteToken(limitBody(s.handleUserInviteAccept))))
+	mux.HandleFunc("POST /v1/users/invites", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteCreate))))))
+	mux.HandleFunc("GET /v1/users/invites", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteList)))))
+	mux.HandleFunc("DELETE /v1/users/invites/{token}", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteRevoke)))))
+	mux.HandleFunc("POST /v1/users/invites/{token}/reinvite", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteReinvite))))))
+	mux.HandleFunc("GET /v1/users/invites/{token}/details", s.requireLegacyAuth(s.requireInitialized(ipUserInviteToken(s.handleUserInviteDetails))))
+	mux.HandleFunc("POST /v1/users/invites/{token}/accept", s.requireLegacyAuth(s.requireInitialized(ipUserInviteToken(limitBody(s.handleUserInviteAccept)))))
 
 	// Vault user management (vault admin)
 	mux.HandleFunc("GET /v1/vaults/{name}/users", s.requireInitialized(s.requireAuth(actorAuthed(s.handleVaultUserList))))
@@ -966,7 +978,7 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	// Email
 	mux.HandleFunc("POST /v1/admin/email/test", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleEmailTest)))))
 
-	mux.HandleFunc("POST /v1/auth/logout", s.requireInitialized(ipAuth(s.handleLogout)))
+	mux.HandleFunc("POST /v1/auth/logout", s.requireLegacyAuth(s.requireInitialized(ipAuth(s.handleLogout))))
 
 	// React app static assets (Vite outputs to /assets/ with base "/")
 	webFS, _ := fs.Sub(webDistFS, "webdist")
@@ -996,6 +1008,16 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 // In multi-instance (Postgres HA) deployments another instance may have
 // handled registration, so we re-check the DB when the in-memory flag is
 // false, throttled to once every 2 seconds to avoid per-request queries.
+func (s *Server) requireLegacyAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authMode == "spiffe" {
+			http.NotFound(w, r)
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) requireInitialized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.initialized {
@@ -1008,12 +1030,16 @@ func (s *Server) requireInitialized(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			s.lastInitCheck.Store(now)
-			if count, err := s.store.CountUsers(r.Context()); err == nil && count > 0 {
+			if count, err := s.store.CountAllOwners(r.Context()); err == nil && count > 0 {
 				s.initialized = true
 			} else {
+				message := "No owner account exists. Run 'agent-vault auth register' to create the first account."
+				if s.authMode == "spiffe" {
+					message = "No active SPIFFE owner exists; one-time bootstrap cannot be replayed."
+				}
 				jsonStatus(w, http.StatusServiceUnavailable, map[string]string{
 					"error":   "not_initialized",
-					"message": "No owner account exists. Run 'agent-vault auth register' to create the first account.",
+					"message": message,
 				})
 				return
 			}
@@ -1281,6 +1307,10 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			sess := &store.Session{AgentID: agent.ID, CreatedAt: time.Now().UTC()}
 			ctx := context.WithValue(r.Context(), sessionContextKey, sess)
 			next(w, r.WithContext(ctx))
+			return
+		}
+		if s.authMode == "spiffe" {
+			jsonError(w, http.StatusUnauthorized, "SPIFFE client identity required")
 			return
 		}
 

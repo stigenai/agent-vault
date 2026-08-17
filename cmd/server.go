@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,7 +31,9 @@ import (
 	"github.com/Infisical/agent-vault/internal/session"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
+	"github.com/Infisical/agent-vault/internal/workloadidentity"
 	"github.com/spf13/cobra"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 const maxPasswordAttempts = 3
@@ -154,16 +157,35 @@ var serverCmd = &cobra.Command{
 			return err
 		}
 
-		// Check if owner account exists; create interactively if possible.
+		// Claim SPIFFE bootstrap before listening. The database marker makes this
+		// safe across concurrently starting Kubernetes replicas.
 		ctx := context.Background()
-		userCount, err := db.CountUsers(ctx)
+		if cfg.Auth.Mode == "spiffe" {
+			bootstrap, err := db.BootstrapSPIFFEOwners(ctx, cfg.Auth.BootstrapOwnerIDs)
+			if err != nil {
+				masterKey.Wipe()
+				return fmt.Errorf("bootstrap SPIFFE owners: %w", err)
+			}
+			if bootstrap.OwnerCount == 0 {
+				masterKey.Wipe()
+				return fmt.Errorf("SPIFFE owner bootstrap was already consumed but no active owner remains")
+			}
+			if bootstrap.SPIFFEOwners == 0 {
+				masterKey.Wipe()
+				return fmt.Errorf("SPIFFE-only mode requires an active SPIFFE owner; create one in hybrid mode before switching")
+			}
+			if !bootstrap.Applied && !sameStringSet(bootstrap.ConfiguredIDs, cfg.Auth.BootstrapOwnerIDs) {
+				logger.Warn("configured SPIFFE bootstrap owners differ from the immutable database claim; changes were ignored")
+			}
+		}
+		ownerCount, err := db.CountAllOwners(ctx)
 		if err != nil {
 			masterKey.Wipe()
-			return fmt.Errorf("checking user count: %w", err)
+			return fmt.Errorf("checking owner count: %w", err)
 		}
-		initialized := userCount > 0
+		initialized := ownerCount > 0
 
-		if !initialized && interactive {
+		if !initialized && interactive && cfg.Auth.Mode != "spiffe" {
 			if err := promptOwnerSetup(cmd, db, nil); err != nil {
 				masterKey.Wipe()
 				return err
@@ -181,14 +203,23 @@ var serverCmd = &cobra.Command{
 		smtpCfg := resolvedSMTP(cfg.SMTP)
 		cfg.SMTP.Password.Wipe()
 		notifier := notify.New(smtpCfg)
-		srv := server.NewWithRuntime(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger, resolvedServerOptions(cfg))
+		identitySource, listenerTLS, proxyTLS, err := configureWorkloadIdentity(ctx, cfg, db)
+		if err != nil {
+			return err
+		}
+		if identitySource != nil {
+			defer func() { _ = identitySource.Close() }()
+		}
+		serverOpts := resolvedServerOptions(cfg)
+		serverOpts.TLSConfig = listenerTLS
+		srv := server.NewWithRuntime(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger, serverOpts)
 		srv.SetSkills(skillCLI)
 		if cfg.Telemetry.Enabled {
 			srv.AttachTelemetry(tel)
 		}
 		shutdownLogs := attachLogSink(srv, db, logger, cfg.Logs)
 		defer shutdownLogs()
-		if err := attachServerExtensions(srv, cfg, masterKey.Key(), db, logger); err != nil {
+		if err := attachServerExtensions(srv, cfg, masterKey.Key(), db, logger, proxyTLS); err != nil {
 			return err
 		}
 		if cfg.Telemetry.Enabled {
@@ -206,7 +237,59 @@ var serverCmd = &cobra.Command{
 // in server.Start: since the MITM proxy is default-on, environments that
 // cannot create ~/.agent-vault/ca/ (read-only FS, containers without HOME,
 // corrupted state) must still be able to run the core HTTP server.
-func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store) error {
+func configureWorkloadIdentity(ctx context.Context, cfg runtimeconfig.Runtime, db store.Store) (*workloadidentity.Source, *tls.Config, *tls.Config, error) {
+	if cfg.Auth.Mode == "legacy" {
+		return nil, nil, nil, nil
+	}
+	domains := make([]spiffeid.TrustDomain, 0, len(cfg.Auth.TrustDomains))
+	for _, raw := range cfg.Auth.TrustDomains {
+		domain, err := spiffeid.TrustDomainFromString(strings.TrimPrefix(raw, "spiffe://"))
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("parse auth trust domain %q: %w", raw, err)
+		}
+		domains = append(domains, domain)
+	}
+	source, err := workloadidentity.New(ctx, workloadidentity.Options{Address: cfg.Auth.WorkloadAPI})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	authorizer := workloadidentity.AuthorizeAgents(db, domains...)
+	// The API requests (but does not handshake-require) a client SVID so
+	// unauthenticated /health remains usable by Kubernetes probes. Protected
+	// routes enforce SPIFFE-only mode in middleware.
+	listenerTLS, err := source.HybridServerTLSConfig(authorizer)
+	if err != nil {
+		_ = source.Close()
+		return nil, nil, nil, fmt.Errorf("configure SPIFFE API listener: %w", err)
+	}
+	var proxyTLS *tls.Config
+	if cfg.Auth.Mode == "spiffe" {
+		proxyTLS, err = source.ServerTLSConfig(authorizer)
+		if err != nil {
+			_ = source.Close()
+			return nil, nil, nil, fmt.Errorf("configure SPIFFE proxy listener: %w", err)
+		}
+	}
+	return source, listenerTLS, proxyTLS, nil
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		values[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := values[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store, proxyTLS *tls.Config) error {
 	host, mitmPort := cfg.Server.Host, cfg.Server.ProxyPort
 	if mitmPort <= 0 {
 		return nil
@@ -231,6 +314,8 @@ func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKe
 		mitm.Options{
 			CA:                      caProv,
 			Sessions:                srv.SessionResolver(),
+			Peers:                   srv.AgentResolver(),
+			Agents:                  db,
 			Credentials:             srv.CredentialProvider(),
 			BaseURL:                 srv.BaseURL(),
 			Logger:                  srv.Logger(),
@@ -241,6 +326,8 @@ func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKe
 			AllowPrivateRanges:      cfg.Proxy.AllowPrivateRanges,
 			NetworkAllowlist:        parseNetworkList(cfg.Proxy.NetworkAllowlist, "proxy.network_allowlist"),
 			NetworkPolicyConfigured: true,
+			TLSConfig:               proxyTLS,
+			SPIFFEOnly:              cfg.Auth.Mode == "spiffe",
 		},
 	))
 	return nil
@@ -248,8 +335,8 @@ func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKe
 
 // attachServerExtensions wires optional subsystems (MITM, Infisical) onto srv.
 // Both bootstrap paths (foreground and detached child) call this.
-func attachServerExtensions(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store, logger *slog.Logger) error {
-	if err := attachMITMIfEnabled(srv, cfg, masterKey, db); err != nil {
+func attachServerExtensions(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store, logger *slog.Logger, proxyTLS *tls.Config) error {
+	if err := attachMITMIfEnabled(srv, cfg, masterKey, db, proxyTLS); err != nil {
 		return err
 	}
 	attachInfisicalIfConfigured(srv, logger)
@@ -608,14 +695,23 @@ func runDetachedChild(cfg runtimeconfig.Runtime, addr string, logger *slog.Logge
 	smtpCfg := resolvedSMTP(cfg.SMTP)
 	cfg.SMTP.Password.Wipe()
 	notifier := notify.New(smtpCfg)
-	srv := server.NewWithRuntime(addr, db, key, notifier, initialized, baseURL, logger, resolvedServerOptions(cfg))
+	identitySource, listenerTLS, proxyTLS, err := configureWorkloadIdentity(context.Background(), cfg, db)
+	if err != nil {
+		return err
+	}
+	if identitySource != nil {
+		defer func() { _ = identitySource.Close() }()
+	}
+	serverOpts := resolvedServerOptions(cfg)
+	serverOpts.TLSConfig = listenerTLS
+	srv := server.NewWithRuntime(addr, db, key, notifier, initialized, baseURL, logger, serverOpts)
 	srv.SetSkills(skillCLI)
 	if cfg.Telemetry.Enabled {
 		srv.AttachTelemetry(tel)
 	}
 	shutdownLogs := attachLogSink(srv, db, logger, cfg.Logs)
 	defer shutdownLogs()
-	if err := attachServerExtensions(srv, cfg, key, db, logger); err != nil {
+	if err := attachServerExtensions(srv, cfg, key, db, logger, proxyTLS); err != nil {
 		return err
 	}
 	if cfg.Telemetry.Enabled {

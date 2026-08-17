@@ -54,6 +54,14 @@ func inspectValue(c Runtime, name string) interface{} {
 		return append([]string(nil), c.Proxy.NetworkAllowlist...)
 	case "proxy.trusted_proxies":
 		return append([]string(nil), c.Proxy.TrustedProxies...)
+	case "auth.mode":
+		return c.Auth.Mode
+	case "auth.workload_api":
+		return c.Auth.WorkloadAPI
+	case "auth.trust_domains":
+		return append([]string(nil), c.Auth.TrustDomains...)
+	case "auth.bootstrap_owner_ids":
+		return append([]string(nil), c.Auth.BootstrapOwnerIDs...)
 	case "client.address":
 		return c.Client.Address
 	case "client.vault":

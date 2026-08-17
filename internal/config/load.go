@@ -246,6 +246,11 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 	}
 	setList("AGENT_VAULT_NETWORK_ALLOWLIST", "proxy.network_allowlist", &result.Config.Proxy.NetworkAllowlist)
 	setList("AGENT_VAULT_TRUSTED_PROXIES", "proxy.trusted_proxies", &result.Config.Proxy.TrustedProxies)
+	setString("AGENT_VAULT_AUTH_MODE", "auth.mode", &result.Config.Auth.Mode)
+	result.Config.Auth.Mode = strings.ToLower(result.Config.Auth.Mode)
+	setString("AGENT_VAULT_AUTH_WORKLOAD_API", "auth.workload_api", &result.Config.Auth.WorkloadAPI)
+	setList("AGENT_VAULT_AUTH_TRUST_DOMAINS", "auth.trust_domains", &result.Config.Auth.TrustDomains)
+	setList("AGENT_VAULT_BOOTSTRAP_OWNER_IDS", "auth.bootstrap_owner_ids", &result.Config.Auth.BootstrapOwnerIDs)
 
 	setString("AGENT_VAULT_ADDR", "client.address", &result.Config.Client.Address)
 	setString("AGENT_VAULT_VAULT", "client.vault", &result.Config.Client.Vault)
@@ -390,6 +395,22 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 	if v := partial.Proxy.TrustedProxies; v != nil {
 		result.Config.Proxy.TrustedProxies = append([]string(nil), (*v)...)
 		set("proxy.trusted_proxies")
+	}
+	if v := partial.Auth.Mode; v != nil {
+		result.Config.Auth.Mode = strings.ToLower(*v)
+		set("auth.mode")
+	}
+	if v := partial.Auth.WorkloadAPI; v != nil {
+		result.Config.Auth.WorkloadAPI = *v
+		set("auth.workload_api")
+	}
+	if v := partial.Auth.TrustDomains; v != nil {
+		result.Config.Auth.TrustDomains = append([]string(nil), (*v)...)
+		set("auth.trust_domains")
+	}
+	if v := partial.Auth.BootstrapOwnerIDs; v != nil {
+		result.Config.Auth.BootstrapOwnerIDs = append([]string(nil), (*v)...)
+		set("auth.bootstrap_owner_ids")
 	}
 	if v := partial.Client.Address; v != nil {
 		result.Config.Client.Address = *v

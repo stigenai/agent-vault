@@ -74,6 +74,18 @@ func TestAuthenticateRequestUsesVerifiedSPIFFEActorAndVaultGrant(t *testing.T) {
 	}
 }
 
+func TestAuthenticateRequestSPIFFEOnlyRejectsBearer(t *testing.T) {
+	p := &Proxy{
+		spiffeOnly: true,
+		sessions:   validTokenResolver("legacy", &brokercore.ProxyScope{AgentID: "legacy-agent", VaultID: "vault-1"}),
+	}
+	req := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid", nil)
+	req.Header.Set("Proxy-Authorization", "Bearer legacy")
+	if _, err := p.authenticateRequest(req); !errors.Is(err, brokercore.ErrInvalidSession) {
+		t.Fatalf("SPIFFE-only proxy accepted bearer: %v", err)
+	}
+}
+
 func proxySPIFFECertificate(t *testing.T, rawID string) *x509.Certificate {
 	t.Helper()
 	uri, err := url.Parse(rawID)
