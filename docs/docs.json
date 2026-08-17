@@ -65,9 +65,10 @@
               "self-hosting/overview",
               "self-hosting/local",
               "self-hosting/docker",
-              "self-hosting/fly-io",
-              "self-hosting/postgres",
-              "self-hosting/environment-variables",
+            "self-hosting/fly-io",
+            "self-hosting/postgres",
+            "self-hosting/runtime-configuration",
+            "self-hosting/environment-variables",
               "self-hosting/maintenance",
               "guides/instance-settings",
               "guides/smtp"

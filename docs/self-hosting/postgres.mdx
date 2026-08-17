@@ -24,6 +24,8 @@ Each instance runs the full Agent Vault binary (API on port 14321 + MITM proxy o
 
 Set `DATABASE_URL` as an environment variable (or pass `--database-url` to the `server` command).
 
+For Kubernetes fleets, prefer `database.url = "file:///var/run/secrets/..."` in [runtime TOML](/self-hosting/runtime-configuration), with the URL projected from a Secret volume. This keeps credentials out of ConfigMaps and process arguments.
+
 ```bash
 # Environment variable
 export DATABASE_URL=postgres://agentvault:<password>@db.example.com:5432/agentvault?sslmode=require

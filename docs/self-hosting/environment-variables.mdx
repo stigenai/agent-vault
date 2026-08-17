@@ -5,6 +5,8 @@ description: "Configuration for deploying an instance of Agent Vault."
 
 ## Server configuration
 
+For fleet deployments, these variables can be migrated incrementally to a validated [runtime TOML file](/self-hosting/runtime-configuration). Environment variables continue to override TOML for compatibility.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PORT` | Optional (defaults to `14321`) | The TCP port the server listens on. Overridden by `--port`. |
@@ -81,4 +83,3 @@ Agent Vault collects anonymous usage telemetry to help improve the product. No c
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `AGENT_VAULT_TELEMETRY` | Optional (defaults to `true`) | Set to `false` to disable anonymous usage telemetry. Also overridable with `--telemetry=false` on the CLI. |
-
