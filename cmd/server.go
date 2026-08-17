@@ -219,7 +219,7 @@ var serverCmd = &cobra.Command{
 		}
 		shutdownLogs := attachLogSink(srv, db, logger, cfg.Logs)
 		defer shutdownLogs()
-		if err := attachServerExtensions(srv, cfg, masterKey.Key(), db, logger, proxyTLS); err != nil {
+		if err := attachServerExtensions(srv, cfg, masterKey.Key(), db, logger, proxyTLS, identitySource); err != nil {
 			return err
 		}
 		if cfg.Telemetry.Enabled {
@@ -335,21 +335,21 @@ func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKe
 
 // attachServerExtensions wires optional subsystems (MITM, Infisical) onto srv.
 // Both bootstrap paths (foreground and detached child) call this.
-func attachServerExtensions(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store, logger *slog.Logger, proxyTLS *tls.Config) error {
+func attachServerExtensions(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store, logger *slog.Logger, proxyTLS *tls.Config, identitySource *workloadidentity.Source) error {
 	if err := attachMITMIfEnabled(srv, cfg, masterKey, db, proxyTLS); err != nil {
 		return err
 	}
-	attachInfisicalIfConfigured(srv, logger)
-	return nil
+	infisicalClient := attachInfisicalIfConfigured(srv, logger)
+	return attachSecretProviders(srv, cfg, masterKey, db, logger, identitySource, infisicalClient)
 }
 
 // attachInfisicalIfConfigured wires the Infisical client when INFISICAL_URL
 // is set. The 10s deadline uses time.After because the SDK login is
 // synchronous and ignores ctx; on timeout we proceed without a client so
 // external vaults serve-stale until next restart.
-func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
+func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) *infisical.Client {
 	if os.Getenv("INFISICAL_URL") == "" {
-		return
+		return nil
 	}
 	type result struct {
 		c   *infisical.Client
@@ -365,12 +365,14 @@ func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
 		if r.err != nil {
 			logger.Warn("infisical client unavailable; external-store vaults will not refresh",
 				slog.String("err", r.err.Error()))
-			return
+			return nil
 		}
 		srv.AttachInfisical(r.c)
+		return r.c
 	case <-time.After(10 * time.Second):
 		logger.Warn("infisical client login exceeded 10s deadline; continuing without external store")
 	}
+	return nil
 }
 
 // attachLogSink wires the request-log pipeline: a BatchSink with async
@@ -711,7 +713,7 @@ func runDetachedChild(cfg runtimeconfig.Runtime, addr string, logger *slog.Logge
 	}
 	shutdownLogs := attachLogSink(srv, db, logger, cfg.Logs)
 	defer shutdownLogs()
-	if err := attachServerExtensions(srv, cfg, key, db, logger, proxyTLS); err != nil {
+	if err := attachServerExtensions(srv, cfg, key, db, logger, proxyTLS, identitySource); err != nil {
 		return err
 	}
 	if cfg.Telemetry.Enabled {

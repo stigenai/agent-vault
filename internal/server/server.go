@@ -7,6 +7,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
+	"github.com/Infisical/agent-vault/internal/secretrefresh"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
@@ -91,6 +93,8 @@ type Server struct {
 	infisicalClient *infisical.Client
 	// infisicalSyncer is built in Run; exposed for manual-refresh RefreshOnce.
 	infisicalSyncer *infisical.Syncer
+	secretRefresh   *secretrefresh.Scheduler
+	providerClosers []io.Closer
 	// infisicalDynamic resolves Infisical dynamic-secret leases on demand; built
 	// in Run alongside the syncer when a client is attached. Nil disables it.
 	infisicalDynamic *infisical.DynamicResolver
@@ -120,6 +124,19 @@ func (s *Server) AttachInfisical(c *infisical.Client) { s.infisicalClient = c }
 // from the attached client. Used by tests to inject a fake fetcher; in prod
 // Start auto-builds one when the field is nil.
 func (s *Server) AttachInfisicalSyncer(syncer *infisical.Syncer) { s.infisicalSyncer = syncer }
+
+// AttachSecretRefreshScheduler enables the common per-credential refresh
+// worker. Legacy vault-wide Infisical syncing is not auto-started when this
+// scheduler is attached; legacy source rows are handled by the registry.
+func (s *Server) AttachSecretRefreshScheduler(scheduler *secretrefresh.Scheduler) {
+	s.secretRefresh = scheduler
+}
+
+func (s *Server) AttachSecretProviderCloser(closer io.Closer) {
+	if closer != nil {
+		s.providerClosers = append(s.providerClosers, closer)
+	}
+}
 
 // AttachLogSink swaps the per-request log sink. Safe to call once at
 // startup, before the HTTP server begins accepting connections. nil
@@ -1102,7 +1119,7 @@ func (s *Server) Start() error {
 	// AES-GCM never reads a zeroed s.encKey (silently produces garbage
 	// ciphertext that lands in the credentials table).
 	syncerDone := make(chan struct{})
-	if s.infisicalSyncer == nil && s.infisicalClient != nil {
+	if s.secretRefresh == nil && s.infisicalSyncer == nil && s.infisicalClient != nil {
 		s.infisicalSyncer = infisical.NewSyncer(s.store, s.infisicalClient, s.encKey, s.logger)
 	}
 	if s.infisicalSyncer != nil {
@@ -1112,6 +1129,23 @@ func (s *Server) Start() error {
 		}()
 	} else {
 		close(syncerDone)
+	}
+	refreshDone := make(chan struct{})
+	if s.secretRefresh != nil {
+		go func() {
+			defer close(refreshDone)
+			_ = s.secretRefresh.Run(pruneCtx, 10*time.Second, func(stats secretrefresh.Stats, err error) {
+				if err != nil && !errors.Is(err, context.Canceled) {
+					s.logger.Warn("secret refresh cycle failed", slog.String("code", "scheduler_error"))
+					return
+				}
+				if stats.Claimed > 0 {
+					s.logger.Debug("secret refresh cycle", slog.Int("claimed", stats.Claimed), slog.Int("updated", stats.Updated), slog.Int("failed", stats.Failed))
+				}
+			})
+		}()
+	} else {
+		close(refreshDone)
 	}
 
 	// Dynamic-secret resolver: leases minted on demand from the proxy path.
@@ -1160,14 +1194,15 @@ func (s *Server) Start() error {
 		defer func() { _ = pidfile.Remove() }()
 	}
 
+	var serveErr error
 	select {
-	case err := <-errCh:
-		return err
+	case serveErr = <-errCh:
 	case <-stop:
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	var shutdownErr error
 
 	fmt.Println("shutting down server...")
 	if s.mitm != nil {
@@ -1176,7 +1211,7 @@ func (s *Server) Start() error {
 		}
 	}
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("server shutdown: %w", err)
+		shutdownErr = fmt.Errorf("server shutdown: %w", err)
 	}
 
 	// Stop background workers (syncer + touch-cache pruner) and wait for the
@@ -1188,6 +1223,20 @@ func (s *Server) Start() error {
 		fmt.Fprintln(os.Stderr, "warning: infisical syncer did not stop within 5s; skipping key wipe to avoid racing in-flight encrypts")
 		return nil
 	}
+	select {
+	case <-refreshDone:
+		if s.secretRefresh != nil {
+			s.secretRefresh.Close()
+		}
+	case <-time.After(5 * time.Second):
+		fmt.Fprintln(os.Stderr, "warning: secret refresh scheduler did not stop within 5s; skipping key wipe to avoid racing in-flight encrypts")
+		return nil
+	}
+	for _, closer := range s.providerClosers {
+		if err := closer.Close(); err != nil {
+			s.logger.Warn("closing secret provider identity source failed")
+		}
+	}
 
 	// Revoke outstanding dynamic-secret leases (best-effort, self-bounded).
 	// Independent of s.encKey: revocation needs only lease IDs + the client.
@@ -1197,7 +1246,10 @@ func (s *Server) Start() error {
 
 	fmt.Println("server shut down gracefully")
 	crypto.WipeBytes(s.encKey)
-	return nil
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	return serveErr
 }
 
 // serve runs the API server on listener, applying the configured rotating TLS

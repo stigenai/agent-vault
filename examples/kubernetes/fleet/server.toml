@@ -35,6 +35,27 @@ trust_domains = ["spiffe://cluster.example"]
 [encryption]
 legacy_master_password = "file:///var/run/secrets/agent-vault/master-password"
 
+# Fleet secret-provider examples. Uncomment only providers configured for the
+# cluster; references in desired-state TOML select these names.
+# [[secret_providers]]
+# name = "aws-production"
+# kind = "aws-secrets-manager"
+# region = "us-east-1"
+
+# [[secret_providers]]
+# name = "bao-production"
+# kind = "openbao-kv-v2"
+# address = "https://openbao.example"
+# auth = "spiffe-x509"
+# auth_mount = "cert"
+# role = "agent-vault"
+
+# [[secret_providers]]
+# name = "onepassword-production"
+# kind = "onepassword-connect"
+# address = "https://onepassword-connect.example"
+# token = "file:///var/run/secrets/onepassword/connect-token"
+
 [logs]
 max_age = "168h"
 max_rows_per_vault = 10000

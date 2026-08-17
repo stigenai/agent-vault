@@ -11,10 +11,15 @@ type InspectedField struct {
 
 // InspectFields returns effective configuration in stable schema order.
 func (r Result) InspectFields() []InspectedField {
-	fields := make([]InspectedField, 0, len(fieldNames))
+	fields := make([]InspectedField, 0, len(fieldNames)+1)
 	for _, name := range fieldNames {
 		fields = append(fields, InspectedField{Name: name, Value: inspectValue(r.Config, name), Source: r.Sources[name]})
 	}
+	source := r.Sources["secret_providers"]
+	if source == "" {
+		source = SourceDefault
+	}
+	fields = append(fields, InspectedField{Name: "secret_providers", Value: inspectValue(r.Config, "secret_providers"), Source: source})
 	return fields
 }
 
@@ -100,6 +105,17 @@ func inspectValue(c Runtime, name string) interface{} {
 		return c.RateLimit.Locked
 	case "telemetry.enabled":
 		return c.Telemetry.Enabled
+	case "secret_providers":
+		providers := make([]map[string]interface{}, 0, len(c.SecretProviders))
+		for _, provider := range c.SecretProviders {
+			providers = append(providers, map[string]interface{}{
+				"name": provider.Name, "kind": provider.Kind, "region": provider.Region,
+				"address": provider.Address, "auth": provider.Auth, "auth_mount": provider.AuthMount,
+				"role": provider.Role, "audience": provider.Audience,
+				"trust_domains": append([]string(nil), provider.TrustDomains...), "token": provider.Token.String(),
+			})
+		}
+		return providers
 	default:
 		return nil
 	}

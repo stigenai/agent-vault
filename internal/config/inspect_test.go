@@ -14,13 +14,16 @@ func TestInspectFieldsAreCompleteStableAndRedacted(t *testing.T) {
 	result := Result{Config: cfg, Sources: defaultSources()}
 
 	fields := result.InspectFields()
-	if len(fields) != len(fieldNames) {
-		t.Fatalf("fields = %d, want %d", len(fields), len(fieldNames))
+	if len(fields) != len(fieldNames)+1 {
+		t.Fatalf("fields = %d, want %d", len(fields), len(fieldNames)+1)
 	}
-	for i, field := range fields {
+	for i, field := range fields[:len(fieldNames)] {
 		if field.Name != fieldNames[i] {
 			t.Fatalf("field %d = %q, want %q", i, field.Name, fieldNames[i])
 		}
+	}
+	if fields[len(fields)-1].Name != "secret_providers" {
+		t.Fatalf("last field = %q, want secret_providers", fields[len(fields)-1].Name)
 	}
 	encoded, err := json.Marshal(fields)
 	if err != nil {

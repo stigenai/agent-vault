@@ -120,6 +120,37 @@ When `encryption.wrappers` is non-empty, `primary_wrapper` is required and must 
 
 Startup uses only the persisted provider primary and fails closed when it is unavailable. Changing `primary_wrapper` performs verified add-before-retire rotation when both old and new wrappers remain in TOML. The age private identity is never accepted in runtime configuration. See [Encryption key recovery](/self-hosting/key-recovery) for the explicit, owner-authorized recovery procedure.
 
+### External secret providers
+
+Provider definitions are non-secret fleet configuration. Every replica builds the same registry and competes for database-backed refresh leases, so only one replica fetches a due credential. Provider values are immediately encrypted under the DEK; only the encrypted last-known-good cache is stored.
+
+```toml
+[[secret_providers]]
+name = "aws-production"
+kind = "aws-secrets-manager"
+region = "us-east-1"
+
+[[secret_providers]]
+name = "bao-production"
+kind = "openbao-kv-v2"
+address = "https://openbao.example"
+auth = "spiffe-x509" # or spiffe-jwt with audience = "..."
+auth_mount = "cert"
+role = "agent-vault"
+
+[[secret_providers]]
+name = "onepassword-production"
+kind = "onepassword-connect"
+address = "https://onepassword-connect.example"
+token = "file:///var/run/secrets/onepassword/connect-token"
+
+[[secret_providers]]
+name = "infisical-production"
+kind = "infisical"
+```
+
+AWS uses the SDK default chain, including EKS Pod Identity and IRSA. OpenBao requires server SPIFFE authentication and uses the live SPIRE Workload API source. A 1Password Connect token must be an `env://` or absolute `file://` reference; inline tokens are rejected and token files are re-read for every request.
+
 ### SPIFFE authentication modes
 
 `auth.mode` accepts `legacy`, `hybrid`, or `spiffe`. Hybrid mode serves the API over TLS with a rotating SPIRE X.509-SVID, accepts a validated client SVID when present, and retains legacy bearer authentication. SPIFFE mode requires mTLS on both API and proxy listeners and rejects password, invite, and durable-token routes.

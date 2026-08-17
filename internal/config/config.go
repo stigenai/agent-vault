@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -44,17 +45,18 @@ func (d Duration) String() string { return time.Duration(d).String() }
 
 // Runtime is the fully resolved, validated runtime configuration.
 type Runtime struct {
-	SchemaVersion int
-	Server        Server
-	Database      Database
-	Proxy         Proxy
-	Auth          Auth
-	Client        Client
-	Encryption    Encryption
-	SMTP          SMTP
-	Logs          Logs
-	RateLimit     RateLimit
-	Telemetry     Telemetry
+	SchemaVersion   int
+	Server          Server
+	Database        Database
+	Proxy           Proxy
+	Auth            Auth
+	Client          Client
+	Encryption      Encryption
+	SMTP            SMTP
+	Logs            Logs
+	RateLimit       RateLimit
+	Telemetry       Telemetry
+	SecretProviders []SecretProviderConfig
 }
 
 type Server struct {
@@ -100,6 +102,19 @@ type Client struct {
 type Relay struct {
 	ListenAddress string
 	RemoteAddress string
+}
+
+type SecretProviderConfig struct {
+	Name         string    `toml:"name" json:"name"`
+	Kind         string    `toml:"kind" json:"kind"`
+	Region       string    `toml:"region" json:"region,omitempty"`
+	Address      string    `toml:"address" json:"address,omitempty"`
+	Auth         string    `toml:"auth" json:"auth,omitempty"`
+	AuthMount    string    `toml:"auth_mount" json:"auth_mount,omitempty"`
+	Role         string    `toml:"role" json:"role,omitempty"`
+	Audience     string    `toml:"audience" json:"audience,omitempty"`
+	TrustDomains []string  `toml:"trust_domains" json:"trust_domains,omitempty"`
+	Token        SecretRef `toml:"token" json:"-"`
 }
 
 // Encryption contains compatibility key material until provider-backed DEK
@@ -164,18 +179,19 @@ type Telemetry struct {
 // Partial represents values supplied by one configuration layer. Pointers
 // distinguish an explicit zero value from an omitted value.
 type Partial struct {
-	SchemaVersion *int              `toml:"schema_version"`
-	Server        PartialServer     `toml:"server"`
-	Database      PartialDatabase   `toml:"database"`
-	Proxy         PartialProxy      `toml:"proxy"`
-	Auth          PartialAuth       `toml:"auth"`
-	Client        PartialClient     `toml:"client"`
-	Relay         PartialRelay      `toml:"relay"`
-	Encryption    PartialEncryption `toml:"encryption"`
-	SMTP          PartialSMTP       `toml:"smtp"`
-	Logs          PartialLogs       `toml:"logs"`
-	RateLimit     PartialRateLimit  `toml:"rate_limit"`
-	Telemetry     PartialTelemetry  `toml:"telemetry"`
+	SchemaVersion   *int                    `toml:"schema_version"`
+	Server          PartialServer           `toml:"server"`
+	Database        PartialDatabase         `toml:"database"`
+	Proxy           PartialProxy            `toml:"proxy"`
+	Auth            PartialAuth             `toml:"auth"`
+	Client          PartialClient           `toml:"client"`
+	Relay           PartialRelay            `toml:"relay"`
+	Encryption      PartialEncryption       `toml:"encryption"`
+	SMTP            PartialSMTP             `toml:"smtp"`
+	Logs            PartialLogs             `toml:"logs"`
+	RateLimit       PartialRateLimit        `toml:"rate_limit"`
+	Telemetry       PartialTelemetry        `toml:"telemetry"`
+	SecretProviders *[]SecretProviderConfig `toml:"secret_providers"`
 }
 
 type PartialServer struct {
@@ -374,6 +390,9 @@ func (c Runtime) Validate() error {
 	if err := validateKeyWrappers(c.Encryption); err != nil {
 		return err
 	}
+	if err := validateSecretProviders(c.SecretProviders, c.Auth); err != nil {
+		return err
+	}
 	if c.Auth.Mode != "legacy" && !strings.HasPrefix(strings.ToLower(c.Server.ExternalAddress), "https://") {
 		return fmt.Errorf("server.external_address: HTTPS URL is required for SPIFFE authentication")
 	}
@@ -406,6 +425,67 @@ func (c Runtime) Validate() error {
 	case "default", "strict", "loose", "off":
 	default:
 		return fmt.Errorf("rate_limit.profile: must be default, strict, loose, or off")
+	}
+	return nil
+}
+
+var configuredProviderName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+func validateSecretProviders(providers []SecretProviderConfig, auth Auth) error {
+	seen := map[string]struct{}{}
+	for i, provider := range providers {
+		prefix := fmt.Sprintf("secret_providers[%d]", i)
+		if !configuredProviderName.MatchString(provider.Name) {
+			return fmt.Errorf("%s.name: must be a lowercase provider slug", prefix)
+		}
+		if _, exists := seen[provider.Name]; exists {
+			return fmt.Errorf("%s.name: duplicate %q", prefix, provider.Name)
+		}
+		seen[provider.Name] = struct{}{}
+		switch provider.Kind {
+		case "aws-secrets-manager":
+			if strings.TrimSpace(provider.Region) == "" {
+				return fmt.Errorf("%s.region: is required", prefix)
+			}
+		case "openbao-kv-v2":
+			if err := validSecretProviderAddress(prefix+".address", provider.Address); err != nil {
+				return err
+			}
+			if provider.Auth != "spiffe-x509" && provider.Auth != "spiffe-jwt" {
+				return fmt.Errorf("%s.auth: must be spiffe-x509 or spiffe-jwt", prefix)
+			}
+			if auth.Mode == "legacy" || !strings.HasPrefix(auth.WorkloadAPI, "unix:///") {
+				return fmt.Errorf("%s.auth: SPIFFE server authentication must be enabled", prefix)
+			}
+			if strings.TrimSpace(provider.Role) == "" {
+				return fmt.Errorf("%s.role: is required", prefix)
+			}
+			if provider.Auth == "spiffe-jwt" && strings.TrimSpace(provider.Audience) == "" {
+				return fmt.Errorf("%s.audience: is required for spiffe-jwt", prefix)
+			}
+			if provider.Auth == "spiffe-x509" && len(provider.TrustDomains) == 0 && len(auth.TrustDomains) == 0 {
+				return fmt.Errorf("%s.trust_domains: is required for spiffe-x509", prefix)
+			}
+		case "onepassword-connect":
+			if err := validSecretProviderAddress(prefix+".address", provider.Address); err != nil {
+				return err
+			}
+			if provider.Token.IsZero() {
+				return fmt.Errorf("%s.token: env:// or file:// reference is required", prefix)
+			}
+		case "infisical":
+		default:
+			return fmt.Errorf("%s.kind: unsupported %q", prefix, provider.Kind)
+		}
+	}
+	return nil
+}
+
+func validSecretProviderAddress(name, raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return fmt.Errorf("%s: must be an HTTPS origin without credentials", name)
 	}
 	return nil
 }

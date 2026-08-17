@@ -502,5 +502,9 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 		result.Config.Telemetry.Enabled = *v
 		set("telemetry.enabled")
 	}
+	if v := partial.SecretProviders; v != nil {
+		result.Config.SecretProviders = append([]SecretProviderConfig(nil), (*v)...)
+		set("secret_providers")
+	}
 	return nil
 }
