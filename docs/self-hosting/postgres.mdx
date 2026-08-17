@@ -20,6 +20,14 @@ Each instance runs the full Agent Vault binary (API on port 14321 + MITM proxy o
 - **PostgreSQL 13 or later**. Any managed Postgres service (AWS RDS, Cloud SQL, Fly Postgres, Neon, Supabase) works.
 - A connection URL: `postgres://user:password@host:5432/dbname`. Append `?sslmode=require` (or `verify-full`) when the server requires TLS.
 
+## Supported versions and rolling upgrades
+
+Agent Vault continuously verifies PostgreSQL majors 13 through 18. The matrix runs real concurrent startup, advisory-lock, SPIFFE bootstrap, refresh-claim, forced-connection-loss, and reconnect tests. Run the same matrix locally with `make test-postgres-ha`; set `POSTGRES_VERSIONS="16 17"` to select a subset.
+
+Schema migrations are forward-only and every replica takes the same database-scoped advisory lock before inspecting or changing the migration ledger. Other starting replicas wait for that lock and do not become ready against a partial schema. Keep all replicas on the same Agent Vault release whenever possible. A rolling deployment may temporarily mix the immediately previous and current release only when that release's notes explicitly mark its migrations backward-compatible; otherwise scale to one replica for the migration window. Do not roll an old binary back after a new migration unless the release notes explicitly permit it—restore the pre-upgrade database backup instead.
+
+Use `maxUnavailable: 0` and `maxSurge: 1`, wait for the new pod to become ready, then continue the rollout. Refresh claims are database leases: a terminated pod cannot cause duplicate provider refreshes, and another replica takes over only after the bounded claim lease expires.
+
 ## Configuration
 
 Set `DATABASE_URL` as an environment variable (or pass `--database-url` to the `server` command).

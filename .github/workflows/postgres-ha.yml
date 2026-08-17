@@ -1,0 +1,56 @@
+name: PostgreSQL HA
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/store/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/postgres-ha.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: postgres-ha-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  postgres-ha:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [13, 14, 15, 16, 17, 18]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_USER: agentvault
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: agentvault
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentvault -d agentvault"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Verify concurrent migrations, bootstrap, refresh claims, and reconnect
+        env:
+          AGENT_VAULT_TEST_POSTGRES_URL: postgres://agentvault:test-password@127.0.0.1:5432/agentvault?sslmode=disable
+        run: go test -race ./internal/store -run '^TestPostgresHA' -count=1
