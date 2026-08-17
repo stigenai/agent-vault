@@ -147,11 +147,18 @@ var serverCmd = &cobra.Command{
 		if !detach {
 			cfg.Database.URL.Wipe()
 		}
+		identitySource, listenerTLS, proxyTLS, err := configureWorkloadIdentity(context.Background(), cfg, db)
+		if err != nil {
+			return err
+		}
+		if identitySource != nil {
+			defer func() { _ = identitySource.Close() }()
+		}
 
 		passwordStdin, _ := cmd.Flags().GetBool("password-stdin")
 		interactive := !passwordStdin && !cfg.Encryption.LegacyMasterPassword.IsSet()
 
-		masterKey, err := unlockOrSetup(cmd, db, passwordStdin, cfg.Encryption.LegacyMasterPassword)
+		masterKey, err := unlockOrSetupWithConfiguredWrappers(cmd, db, passwordStdin, cfg.Encryption, identitySource, cfg.Auth.TrustDomains)
 		cfg.Encryption.LegacyMasterPassword.Wipe()
 		if err != nil {
 			return err
@@ -203,13 +210,6 @@ var serverCmd = &cobra.Command{
 		smtpCfg := resolvedSMTP(cfg.SMTP)
 		cfg.SMTP.Password.Wipe()
 		notifier := notify.New(smtpCfg)
-		identitySource, listenerTLS, proxyTLS, err := configureWorkloadIdentity(ctx, cfg, db)
-		if err != nil {
-			return err
-		}
-		if identitySource != nil {
-			defer func() { _ = identitySource.Close() }()
-		}
 		serverOpts := resolvedServerOptions(cfg)
 		serverOpts.TLSConfig = listenerTLS
 		srv := server.NewWithRuntime(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger, serverOpts)

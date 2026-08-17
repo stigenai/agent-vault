@@ -145,6 +145,13 @@ type DEKWrappingStore interface {
 	GetPrimaryDEKWrapping(ctx context.Context) (*DEKWrappingRecord, error)
 }
 
+type KeyWrappingStore interface {
+	DEKWrappingStore
+	GetMasterKeyRecord(context.Context) (*MasterKeyRecord, error)
+	GetOrCreateSetting(context.Context, string, string) (string, error)
+	PromoteDEKWrapping(context.Context, string, bool) error
+}
+
 // Session represents an authenticated session.
 // User sessions: VaultID may be set (scoped) or empty (global login).
 // Agent tokens: VaultID is empty; vault resolved per-request via X-Vault header.

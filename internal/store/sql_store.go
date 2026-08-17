@@ -129,6 +129,16 @@ func (s *SQLStore) SetSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
+func (s *SQLStore) GetOrCreateSetting(ctx context.Context, key, candidate string) (string, error) {
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx, s.dialect.Rebind(
+		`INSERT INTO instance_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING`),
+		key, candidate, now); err != nil {
+		return "", fmt.Errorf("creating instance setting: %w", err)
+	}
+	return s.GetSetting(ctx, key)
+}
+
 func (s *SQLStore) GetAllSettings(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(`SELECT key, value FROM instance_settings`))
 	if err != nil {
@@ -1839,6 +1849,48 @@ func (s *SQLStore) GetPrimaryDEKWrapping(ctx context.Context) (*DEKWrappingRecor
 		return nil, sql.ErrNoRows
 	}
 	return &rows[0], nil
+}
+
+// PromoteDEKWrapping atomically serializes competing replicas on the
+// singleton master-key row, demotes the prior primary, promotes target, and
+// optionally clears the legacy plaintext DEK only after target is known to be
+// a verified non-retired wrapping.
+func (s *SQLStore) PromoteDEKWrapping(ctx context.Context, targetID string, clearPlaintext bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning DEK wrapping promotion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var masterID int
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM master_key WHERE id = 1`+s.dialect.ForUpdateClause()).Scan(&masterID); err != nil {
+		return fmt.Errorf("locking master key for wrapping promotion: %w", err)
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT status FROM dek_wrappings WHERE id = ? AND master_key_id = 1`), targetID).Scan(&status); err != nil {
+		return fmt.Errorf("selecting verified DEK wrapping: %w", err)
+	}
+	if status == DEKWrappingRetired {
+		return fmt.Errorf("retired DEK wrapping cannot become primary")
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`UPDATE dek_wrappings SET status = ? WHERE master_key_id = 1 AND status = ? AND id <> ?`),
+		DEKWrappingActive, DEKWrappingPrimary, targetID); err != nil {
+		return fmt.Errorf("demoting prior DEK wrapping: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`UPDATE dek_wrappings SET status = ? WHERE id = ?`), DEKWrappingPrimary, targetID); err != nil {
+		return fmt.Errorf("promoting DEK wrapping: %w", err)
+	}
+	if clearPlaintext {
+		if _, err := tx.ExecContext(ctx, `UPDATE master_key SET dek_plaintext = NULL WHERE id = 1`); err != nil {
+			return fmt.Errorf("clearing legacy plaintext DEK: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing DEK wrapping promotion: %w", err)
+	}
+	return nil
 }
 
 // --- Broker Configs ---
