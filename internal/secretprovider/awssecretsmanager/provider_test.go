@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Infisical/agent-vault/internal/secretprovider"
+	"github.com/Infisical/agent-vault/internal/secretprovider/contracttest"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
@@ -211,4 +212,14 @@ func TestFetchSanitizesAWSAndResponseFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProviderCancellationContract(t *testing.T) {
+	provider, err := New(context.Background(), Options{Client: &fakeClient{output: &secretsmanager.GetSecretValueOutput{
+		SecretString: aws.String("SECRET"), VersionId: aws.String("v1"),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.RequireCancellation(t, provider, "application/prod")
 }

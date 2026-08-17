@@ -13,6 +13,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/openbaoauth"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
+	"github.com/Infisical/agent-vault/internal/secretprovider/contracttest"
 )
 
 type fakeTokenSource struct {
@@ -155,4 +156,9 @@ func testProvider(t *testing.T, tokens openbaoauth.TokenSource, client *http.Cli
 		t.Fatal(err)
 	}
 	return provider
+}
+
+func TestProviderCancellationContract(t *testing.T) {
+	provider := testProvider(t, &fakeTokenSource{token: []byte("token")}, http.DefaultClient, "https://openbao.example")
+	contracttest.RequireCancellation(t, provider, "kv/application#token")
 }

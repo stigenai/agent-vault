@@ -151,12 +151,18 @@ func canonicalProviderReference(ref ProviderReference) string {
 }
 
 func (p *Provider) Fetch(ctx context.Context, reference secretprovider.Reference) (secretprovider.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return secretprovider.Result{}, err
+	}
 	ref, ok := reference.(ProviderReference)
 	if !ok || ref.ProviderKind() != p.Kind() || ref.key == "" {
 		return secretprovider.Result{}, secretprovider.NewError(secretprovider.CodeInvalidReference)
 	}
 	selected, err := p.fetcher.FetchSecret(ctx, ref.config, ref.key)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return secretprovider.Result{}, err
+		}
 		return secretprovider.Result{}, classifyProviderError(err)
 	}
 	if selected.Key == "" {

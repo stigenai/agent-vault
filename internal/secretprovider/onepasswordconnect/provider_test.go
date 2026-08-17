@@ -12,6 +12,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/config"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
+	"github.com/Infisical/agent-vault/internal/secretprovider/contracttest"
 )
 
 func TestNewRequiresTypedTokenReferenceAndParseCanonicalizes(t *testing.T) {
@@ -191,4 +192,9 @@ func testProvider(t *testing.T, address string, client *http.Client, rawRef, tok
 		t.Fatal(err)
 	}
 	return provider
+}
+
+func TestProviderCancellationContract(t *testing.T) {
+	provider := testProvider(t, "https://connect.example", http.DefaultClient, "env://OP_CONNECT_TOKEN", "token")
+	contracttest.RequireCancellation(t, provider, "vault/item/password")
 }

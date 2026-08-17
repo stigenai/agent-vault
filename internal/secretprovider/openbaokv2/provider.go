@@ -137,6 +137,9 @@ func canonicalReference(ref Reference) string {
 }
 
 func (p *Provider) Fetch(ctx context.Context, reference secretprovider.Reference) (secretprovider.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return secretprovider.Result{}, err
+	}
 	ref, ok := reference.(Reference)
 	if !ok || ref.ProviderKind() != p.Kind() || ref.mount == "" || ref.path == "" || ref.field == "" {
 		return secretprovider.Result{}, secretprovider.NewError(secretprovider.CodeInvalidReference)
@@ -144,6 +147,9 @@ func (p *Provider) Fetch(ctx context.Context, reference secretprovider.Reference
 	token, err := p.tokens.Token(ctx)
 	if err != nil || len(token) == 0 {
 		vaultcrypto.WipeBytes(token)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return secretprovider.Result{}, ctxErr
+		}
 		if errors.Is(err, openbaoauth.ErrDenied) {
 			return secretprovider.Result{}, secretprovider.NewError(secretprovider.CodeAccessDenied)
 		}
@@ -163,6 +169,9 @@ func (p *Provider) Fetch(ctx context.Context, reference secretprovider.Reference
 	resp, err := p.client.Do(req)
 	req.Header.Del("X-Vault-Token")
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return secretprovider.Result{}, ctxErr
+		}
 		return secretprovider.Result{}, secretprovider.NewError(secretprovider.CodeUnavailable)
 	}
 	defer resp.Body.Close()

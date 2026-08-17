@@ -178,6 +178,9 @@ func canonicalReference(ref Reference) string {
 }
 
 func (p *Provider) Fetch(ctx context.Context, reference secretprovider.Reference) (secretprovider.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return secretprovider.Result{}, err
+	}
 	ref, ok := reference.(Reference)
 	if !ok || ref.ProviderKind() != p.Kind() || ref.secretID == "" {
 		return secretprovider.Result{}, secretprovider.NewError(secretprovider.CodeInvalidReference)
@@ -191,6 +194,9 @@ func (p *Provider) Fetch(ctx context.Context, reference secretprovider.Reference
 	}
 	output, err := p.client.GetSecretValue(ctx, input)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return secretprovider.Result{}, err
+		}
 		return secretprovider.Result{}, classifyError(err)
 	}
 	if output == nil || output.VersionId == nil || *output.VersionId == "" ||

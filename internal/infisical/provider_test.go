@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Infisical/agent-vault/internal/secretprovider"
+	"github.com/Infisical/agent-vault/internal/secretprovider/contracttest"
 	"github.com/Infisical/agent-vault/internal/store"
 	sdkerrors "github.com/infisical/go-sdk/packages/errors"
 )
@@ -178,4 +179,12 @@ func TestRegisterLegacyProvidersPreservesEachVaultConfiguration(t *testing.T) {
 			t.Fatalf("fetch config %d = %#v", i, fetcher.configs[i])
 		}
 	}
+}
+
+func TestProviderCancellationContract(t *testing.T) {
+	provider, err := NewProvider(ProviderOptions{Fetcher: &providerFetcher{secret: Secret{Key: "TOKEN", Value: "SECRET", Version: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.RequireCancellation(t, provider, "project/prod#TOKEN")
 }
