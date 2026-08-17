@@ -268,6 +268,16 @@ func TestFleetApplyReportsPartialFailureAndCompensatesFailedCreate(t *testing.T)
 	if _, exists := ms.managedResources[credentialKey]; exists {
 		t.Fatal("failed credential create left an ownership reservation")
 	}
+	ms.setCredentialSourceErr = nil
+	recovery, recoveryDigest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	if recovery.Blocked || recovery.Summary.Noop != 2 || recovery.Summary.Create != 3 {
+		t.Fatalf("recovery plan = %#v", recovery)
+	}
+	applyTestFleetPlan(t, srv, token, manifest, fleetplan.Options{}, recoveryDigest, http.StatusOK)
+	converged, _ := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	if converged.Summary.Noop != 5 {
+		t.Fatalf("recovered state did not converge: %#v", converged)
+	}
 }
 
 func setupFleetApplyTest(t *testing.T) (*Server, *mockStore, string) {

@@ -197,6 +197,9 @@ func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest
 	case store.ManagedResourceVault:
 		vault, err := s.store.CreateVault(ctx, ref.Name)
 		if err != nil {
+			if existing, lookupErr := s.store.GetVault(ctx, ref.Name); lookupErr == nil && existing != nil {
+				return sql.ErrNoRows
+			}
 			return err
 		}
 		key = store.ManagedResourceKey{Kind: ref.Kind, ResourceID: vault.ID}
@@ -212,6 +215,9 @@ func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest
 		}
 		agent, err := s.store.CreateAgent(ctx, desired.Name, actor.ID, desired.Role)
 		if err != nil {
+			if existing, lookupErr := s.store.GetAgentByName(ctx, desired.Name); lookupErr == nil && existing != nil {
+				return sql.ErrNoRows
+			}
 			return err
 		}
 		if err := s.store.UpdateAgentSPIFFEID(ctx, agent.ID, desired.SPIFFEID); err != nil {
