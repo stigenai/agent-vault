@@ -68,7 +68,7 @@ func unlockOrSetupWithWrapperSet(cmd *cobra.Command, db store.Store, passwordStd
 		if currentWrapper == nil {
 			return nil, fmt.Errorf("persisted primary DEK wrapper %s/%s is not configured", persistedPrimary.Provider, persistedPrimary.KeyID)
 		}
-		dek, err := keywrap.UnwrapPrimary(ctx, persistence, currentWrapper, binding)
+		dek, err := keywrap.UnwrapRecord(ctx, persistedPrimary, currentWrapper, binding)
 		if err != nil {
 			return nil, fmt.Errorf("unwrap configured primary DEK: %w", err)
 		}

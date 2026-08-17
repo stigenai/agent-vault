@@ -114,10 +114,19 @@ func UnwrapPrimary(ctx context.Context, persistence store.KeyWrappingStore, wrap
 	if err != nil {
 		return nil, err
 	}
-	if primary.Provider != wrapper.Identity().Provider || primary.KeyID != wrapper.Identity().KeyID {
-		return nil, errors.New("persisted primary DEK wrapper does not match configured primary")
+	return UnwrapRecord(ctx, primary, wrapper, binding)
+}
+
+// UnwrapRecord unwraps the exact versioned row selected by the caller. This
+// avoids a second primary read racing with another replica's promotion.
+func UnwrapRecord(ctx context.Context, record *store.DEKWrappingRecord, wrapper KeyWrapper, binding Binding) ([]byte, error) {
+	if record == nil || wrapper == nil {
+		return nil, errors.New("DEK wrapping record and wrapper are required")
 	}
-	return wrapper.Unwrap(ctx, WrappedDEK{Ciphertext: primary.WrappedDEK, KeyVersion: primary.KeyVersion}, binding)
+	if record.Provider != wrapper.Identity().Provider || record.KeyID != wrapper.Identity().KeyID {
+		return nil, errors.New("persisted DEK wrapping does not match selected wrapper")
+	}
+	return wrapper.Unwrap(ctx, WrappedDEK{Ciphertext: record.WrappedDEK, KeyVersion: record.KeyVersion}, binding)
 }
 
 func findWrapping(ctx context.Context, persistence store.KeyWrappingStore, identity Identity, version string) (*store.DEKWrappingRecord, error) {
