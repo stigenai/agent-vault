@@ -295,6 +295,9 @@ func (s *SQLStore) CreateExternalVault(ctx context.Context, p CreateExternalVaul
 			return nil, fmt.Errorf("inserting credential %q: %w", item.Key, err)
 		}
 	}
+	if err := s.attachLegacyInfisicalSourcesTx(ctx, tx, vaultID); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`INSERT INTO vault_grants (actor_id, actor_type, vault_id, role, created_at)
@@ -350,7 +353,12 @@ func (s *SQLStore) ListVaultCredentialStores(ctx context.Context) ([]VaultCreden
 // gone (vault deleted mid-sync); callers should treat that as benign.
 func (s *SQLStore) UpdateVaultCredentialStoreHealth(ctx context.Context, vaultID, status, errMsg string, syncedAt time.Time) error {
 	syncedStr := s.dialect.FormatTime(syncedAt.UTC())
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning credential store health update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`UPDATE vault_credential_stores
 		    SET last_synced_at = ?, last_sync_status = ?, last_sync_error = ?, updated_at = ?
 		  WHERE vault_id = ?`),
@@ -362,6 +370,23 @@ func (s *SQLStore) UpdateVaultCredentialStoreHealth(ctx context.Context, vaultID
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+	health := CredentialSourceHealthError
+	errorCode := "legacy-sync-error"
+	if status == SyncStatusOK {
+		health = CredentialSourceHealthOK
+		errorCode = ""
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`UPDATE credential_sources
+		SET health = ?, last_error_code = ?, last_refresh_at = ?,
+			last_success_at = CASE WHEN ? = 'ok' THEN ? ELSE last_success_at END,
+			updated_at = ?
+		WHERE vault_id = ? AND kind = 'infisical' AND provider_name = ?`),
+		health, errorCode, syncedStr, health, syncedStr, s.now(), vaultID, "legacy-infisical-"+vaultID); err != nil {
+		return fmt.Errorf("updating legacy credential source health: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing credential store health: %w", err)
 	}
 	return nil
 }
@@ -391,6 +416,33 @@ func (s *SQLStore) replaceCredentialsTx(ctx context.Context, tx *sql.Tx, vaultID
 		); err != nil {
 			return fmt.Errorf("inserting credential %q: %w", item.Key, err)
 		}
+	}
+	return s.attachLegacyInfisicalSourcesTx(ctx, tx, vaultID)
+}
+
+func (s *SQLStore) attachLegacyInfisicalSourcesTx(ctx context.Context, tx *sql.Tx, vaultID string) error {
+	_, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO credential_sources (
+		vault_id, credential_key, mode, kind, provider_name, reference,
+		refresh_interval_seconds, max_staleness_seconds, provider_version,
+		health, last_error_code, cache_updated_at, last_refresh_at,
+		last_success_at, next_refresh_at, created_at, updated_at)
+	SELECT c.vault_id, c.key, 'reference', 'infisical',
+		'legacy-infisical-' || c.vault_id, c.key, vcs.poll_interval_seconds, 0, '',
+		CASE vcs.last_sync_status WHEN 'ok' THEN 'ok' WHEN 'error' THEN 'error' ELSE 'pending' END,
+		CASE vcs.last_sync_status WHEN 'error' THEN 'legacy-sync-error' ELSE '' END,
+		c.updated_at, vcs.last_synced_at,
+		CASE WHEN vcs.last_sync_status = 'ok' THEN COALESCE(vcs.last_synced_at, c.updated_at) ELSE c.updated_at END,
+		NULL, c.created_at, c.updated_at
+	FROM credentials c JOIN vault_credential_stores vcs ON vcs.vault_id = c.vault_id
+	WHERE c.vault_id = ? AND c.type = 'static'
+	ON CONFLICT(vault_id, credential_key) DO UPDATE SET
+		provider_name = excluded.provider_name, reference = excluded.reference,
+		refresh_interval_seconds = excluded.refresh_interval_seconds,
+		health = excluded.health, last_error_code = excluded.last_error_code,
+		cache_updated_at = excluded.cache_updated_at, last_refresh_at = excluded.last_refresh_at,
+		last_success_at = excluded.last_success_at, updated_at = excluded.updated_at`), vaultID)
+	if err != nil {
+		return fmt.Errorf("attaching legacy Infisical credential sources: %w", err)
 	}
 	return nil
 }
@@ -484,9 +536,22 @@ func (s *SQLStore) SetVaultExternalStore(ctx context.Context, p SetVaultExternal
 // the last synced snapshot becomes ordinary built-in credentials. Returns nil
 // when no row exists (the vault was already built-in).
 func (s *SQLStore) DeleteVaultCredentialStore(ctx context.Context, vaultID string) error {
-	if _, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning credential store deletion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM credential_sources WHERE vault_id = ? AND kind = 'infisical' AND provider_name = ?`),
+		vaultID, "legacy-infisical-"+vaultID); err != nil {
+		return fmt.Errorf("detaching legacy Infisical credential sources: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`DELETE FROM vault_credential_stores WHERE vault_id = ?`), vaultID); err != nil {
 		return fmt.Errorf("deleting credential store: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing credential store deletion: %w", err)
 	}
 	return nil
 }
@@ -703,7 +768,12 @@ func (s *SQLStore) SetCredential(ctx context.Context, vaultID, key string, ciphe
 	now := time.Now().UTC()
 	nowStr := s.dialect.FormatTime(now)
 
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning local credential update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx,
 		s.dialect.Rebind(`INSERT INTO credentials (id, vault_id, key, type, ciphertext, nonce, created_at, updated_at)
 		 VALUES (?, ?, ?, 'static', ?, ?, ?, ?)
 		 ON CONFLICT(vault_id, key) DO UPDATE SET
@@ -714,6 +784,15 @@ func (s *SQLStore) SetCredential(ctx context.Context, vaultID, key string, ciphe
 	)
 	if err != nil {
 		return nil, fmt.Errorf("setting credential: %w", err)
+	}
+	// Direct sets and one-time imports intentionally sever any live provider
+	// relationship while retaining the newly encrypted local value.
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM credential_sources WHERE vault_id = ? AND credential_key = ?`), vaultID, key); err != nil {
+		return nil, fmt.Errorf("clearing credential source: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing local credential update: %w", err)
 	}
 
 	return &Credential{
@@ -763,6 +842,138 @@ func (s *SQLStore) DeleteCredential(ctx context.Context, vaultID, key string) er
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// SetCredentialSource attaches or updates non-secret live-reference metadata
+// for an existing encrypted credential cache row.
+func (s *SQLStore) SetCredentialSource(ctx context.Context, source CredentialSource) (*CredentialSource, error) {
+	if err := validateCredentialSource(source); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if source.CreatedAt.IsZero() {
+		source.CreatedAt = now
+	}
+	source.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO credential_sources
+		(vault_id, credential_key, mode, kind, provider_name, reference,
+		 refresh_interval_seconds, max_staleness_seconds, provider_version, health,
+		 last_error_code, cache_updated_at, last_refresh_at, last_success_at,
+		 next_refresh_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(vault_id, credential_key) DO UPDATE SET
+		 mode = excluded.mode, kind = excluded.kind, provider_name = excluded.provider_name,
+		 reference = excluded.reference, refresh_interval_seconds = excluded.refresh_interval_seconds,
+		 max_staleness_seconds = excluded.max_staleness_seconds,
+		 provider_version = excluded.provider_version, health = excluded.health,
+		 last_error_code = excluded.last_error_code, cache_updated_at = excluded.cache_updated_at,
+		 last_refresh_at = excluded.last_refresh_at, last_success_at = excluded.last_success_at,
+		 next_refresh_at = excluded.next_refresh_at, updated_at = excluded.updated_at`),
+		source.VaultID, source.CredentialKey, source.Mode, source.Kind, source.ProviderName,
+		source.Reference, source.RefreshIntervalSeconds, source.MaxStalenessSeconds,
+		source.ProviderVersion, source.Health, source.LastErrorCode,
+		s.dialect.FormatNullableTime(source.CacheUpdatedAt), s.dialect.FormatNullableTime(source.LastRefreshAt),
+		s.dialect.FormatNullableTime(source.LastSuccessAt), s.dialect.FormatNullableTime(source.NextRefreshAt),
+		s.dialect.FormatTime(source.CreatedAt), s.dialect.FormatTime(source.UpdatedAt))
+	if err != nil {
+		return nil, fmt.Errorf("setting credential source: %w", err)
+	}
+	return s.GetCredentialSource(ctx, source.VaultID, source.CredentialKey)
+}
+
+func (s *SQLStore) GetCredentialSource(ctx context.Context, vaultID, credentialKey string) (*CredentialSource, error) {
+	row := s.db.QueryRowContext(ctx, s.dialect.Rebind(credentialSourceSelect+` WHERE vault_id = ? AND credential_key = ?`), vaultID, credentialKey)
+	return s.scanCredentialSource(row)
+}
+
+func (s *SQLStore) ListCredentialSources(ctx context.Context, vaultID string) ([]CredentialSource, error) {
+	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(credentialSourceSelect+` WHERE vault_id = ? ORDER BY credential_key`), vaultID)
+	if err != nil {
+		return nil, fmt.Errorf("listing credential sources: %w", err)
+	}
+	defer rows.Close()
+	var sources []CredentialSource
+	for rows.Next() {
+		source, err := s.scanCredentialSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, *source)
+	}
+	return sources, rows.Err()
+}
+
+func (s *SQLStore) DeleteCredentialSource(ctx context.Context, vaultID, credentialKey string) error {
+	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM credential_sources WHERE vault_id = ? AND credential_key = ?`), vaultID, credentialKey)
+	if err != nil {
+		return fmt.Errorf("deleting credential source: %w", err)
+	}
+	return nil
+}
+
+const credentialSourceSelect = `SELECT vault_id, credential_key, mode, kind, provider_name, reference,
+	refresh_interval_seconds, max_staleness_seconds, provider_version, health, last_error_code,
+	cache_updated_at, last_refresh_at, last_success_at, next_refresh_at, created_at, updated_at
+	FROM credential_sources`
+
+func (s *SQLStore) scanCredentialSource(row rowScanner) (*CredentialSource, error) {
+	var source CredentialSource
+	var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, createdAt, updatedAt any
+	if err := row.Scan(&source.VaultID, &source.CredentialKey, &source.Mode, &source.Kind,
+		&source.ProviderName, &source.Reference, &source.RefreshIntervalSeconds,
+		&source.MaxStalenessSeconds, &source.ProviderVersion, &source.Health, &source.LastErrorCode,
+		&cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt, &nextRefreshAt, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	var err error
+	if source.CacheUpdatedAt, err = s.dialect.ScanNullableTime(cacheUpdatedAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source cache time: %w", err)
+	}
+	if source.LastRefreshAt, err = s.dialect.ScanNullableTime(lastRefreshAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source refresh time: %w", err)
+	}
+	if source.LastSuccessAt, err = s.dialect.ScanNullableTime(lastSuccessAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source success time: %w", err)
+	}
+	if source.NextRefreshAt, err = s.dialect.ScanNullableTime(nextRefreshAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source next refresh time: %w", err)
+	}
+	if source.CreatedAt, err = s.dialect.ScanTime(createdAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source created time: %w", err)
+	}
+	if source.UpdatedAt, err = s.dialect.ScanTime(updatedAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source updated time: %w", err)
+	}
+	return &source, nil
+}
+
+func validateCredentialSource(source CredentialSource) error {
+	if source.VaultID == "" || source.CredentialKey == "" || source.ProviderName == "" || source.Reference == "" {
+		return fmt.Errorf("credential source vault, key, provider name, and reference are required")
+	}
+	if source.Mode != CredentialSourceModeReference {
+		return fmt.Errorf("credential source mode must be %q", CredentialSourceModeReference)
+	}
+	switch source.Kind {
+	case CredentialSourceAWSSecretsManager, CredentialSourceOpenBaoKV2, CredentialSourceOnePassword, CredentialSourceInfisical:
+	default:
+		return fmt.Errorf("unsupported credential source kind %q", source.Kind)
+	}
+	if source.RefreshIntervalSeconds < 10 || source.MaxStalenessSeconds < 0 {
+		return fmt.Errorf("credential source refresh interval must be at least 10 seconds and max staleness non-negative")
+	}
+	switch source.Health {
+	case CredentialSourceHealthPending, CredentialSourceHealthOK, CredentialSourceHealthError, CredentialSourceHealthStale:
+	default:
+		return fmt.Errorf("unsupported credential source health %q", source.Health)
+	}
+	for _, value := range []string{source.ProviderName, source.Reference, source.ProviderVersion, source.LastErrorCode} {
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("credential source metadata contains control characters")
+		}
 	}
 	return nil
 }

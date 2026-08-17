@@ -298,6 +298,50 @@ type EncryptedKV struct {
 	Nonce      []byte
 }
 
+const (
+	CredentialSourceModeReference = "reference"
+
+	CredentialSourceAWSSecretsManager = "aws-secrets-manager"
+	CredentialSourceOpenBaoKV2        = "openbao-kv-v2"
+	CredentialSourceOnePassword       = "onepassword-connect"
+	CredentialSourceInfisical         = "infisical"
+
+	CredentialSourceHealthPending = "pending"
+	CredentialSourceHealthOK      = "ok"
+	CredentialSourceHealthError   = "error"
+	CredentialSourceHealthStale   = "stale"
+)
+
+// CredentialSource contains only reference and refresh metadata. The current
+// encrypted last-known-good value remains in credentials.ciphertext/nonce.
+// Local and one-time imported credentials deliberately have no source row.
+type CredentialSource struct {
+	VaultID                string
+	CredentialKey          string
+	Mode                   string
+	Kind                   string
+	ProviderName           string
+	Reference              string
+	RefreshIntervalSeconds int
+	MaxStalenessSeconds    int
+	ProviderVersion        string
+	Health                 string
+	LastErrorCode          string
+	CacheUpdatedAt         *time.Time
+	LastRefreshAt          *time.Time
+	LastSuccessAt          *time.Time
+	NextRefreshAt          *time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+}
+
+type CredentialSourceStore interface {
+	SetCredentialSource(context.Context, CredentialSource) (*CredentialSource, error)
+	GetCredentialSource(context.Context, string, string) (*CredentialSource, error)
+	ListCredentialSources(context.Context, string) ([]CredentialSource, error)
+	DeleteCredentialSource(context.Context, string, string) error
+}
+
 // Wire-protocol values for VaultCredentialStore.Kind. KindBuiltin is the
 // API sentinel for "no external store" and is never persisted.
 const (

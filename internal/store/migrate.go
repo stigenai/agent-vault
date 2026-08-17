@@ -31,6 +31,7 @@ func CountSourceTables(src *SQLStore) ([]TableCount, error) {
 		"agents",
 		"vault_grants",
 		"credentials",
+		"credential_sources",
 		"credential_oauth",
 		"credential_oauth_states",
 		"broker_configs",
@@ -128,6 +129,7 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 		{"agents", copyAgents},
 		{"vault_grants", copyVaultGrants},
 		{"credentials", copyCredentials},
+		{"credential_sources", copyCredentialSources},
 		{"credential_oauth", copyCredentialOAuth},
 		{"credential_oauth_states", copyCredentialOAuthStates},
 		{"broker_configs", copyBrokerConfigs},
@@ -496,6 +498,50 @@ func copyCredentials(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect 
 			id, vaultID, key, typ, ct, nonce, ca, ua,
 		)
 		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT vault_id, credential_key, mode, kind,
+		provider_name, reference, refresh_interval_seconds, max_staleness_seconds,
+		provider_version, health, last_error_code, cache_updated_at, last_refresh_at,
+		last_success_at, next_refresh_at, created_at, updated_at FROM credential_sources`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var source CredentialSource
+		var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, createdAt, updatedAt any
+		if err := rows.Scan(&source.VaultID, &source.CredentialKey, &source.Mode, &source.Kind,
+			&source.ProviderName, &source.Reference, &source.RefreshIntervalSeconds,
+			&source.MaxStalenessSeconds, &source.ProviderVersion, &source.Health,
+			&source.LastErrorCode, &cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt,
+			&nextRefreshAt, &createdAt, &updatedAt); err != nil {
+			return n, err
+		}
+		converted := make([]any, 6)
+		for i, value := range []any{cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, createdAt, updatedAt} {
+			converted[i], err = convertTime(value, src.dialect, dstDialect)
+			if err != nil {
+				return n, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO credential_sources
+			(vault_id, credential_key, mode, kind, provider_name, reference,
+			 refresh_interval_seconds, max_staleness_seconds, provider_version, health,
+			 last_error_code, cache_updated_at, last_refresh_at, last_success_at,
+			 next_refresh_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			source.VaultID, source.CredentialKey, source.Mode, source.Kind, source.ProviderName,
+			source.Reference, source.RefreshIntervalSeconds, source.MaxStalenessSeconds,
+			source.ProviderVersion, source.Health, source.LastErrorCode,
+			converted[0], converted[1], converted[2], converted[3], converted[4], converted[5]); err != nil {
 			return n, err
 		}
 		n++
