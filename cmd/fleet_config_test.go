@@ -21,9 +21,10 @@ import (
 func TestFleetConfigPlanAndGuardedApplyUseWorkloadIdentity(t *testing.T) {
 	var applyCalls int
 	var applied struct {
-		Manifest           *fleetconfig.Manifest `json:"manifest"`
-		Options            fleetplan.Options     `json:"options"`
-		ExpectedPlanSHA256 string                `json:"expected_plan_sha256"`
+		Manifest           *fleetconfig.Manifest        `json:"manifest"`
+		Options            fleetplan.Options            `json:"options"`
+		ExpectedPlanSHA256 string                       `json:"expected_plan_sha256"`
+		Imports            []fleetResolvedImportPayload `json:"imports"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "" {
@@ -67,6 +68,10 @@ func TestFleetConfigPlanAndGuardedApplyUseWorkloadIdentity(t *testing.T) {
 	})
 
 	path := filepath.Join(t.TempDir(), "fleet.toml")
+	t.Setenv("FLEET_IMPORTED_TOKEN", "restore-after-test")
+	if err := os.Unsetenv("FLEET_IMPORTED_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
 	manifest := `schema_version = 1
 manager = "platform-fleet"
 
@@ -89,6 +94,10 @@ source = "aws-production"
 ref = "application/token"
 refresh_interval = "1m"
 max_staleness = "5m"
+
+[[vaults.imports]]
+name = "IMPORTED_TOKEN"
+from = "env://FLEET_IMPORTED_TOKEN"
 `
 	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
@@ -102,14 +111,14 @@ max_staleness = "5m"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.Plan.Blocked || input.Plan.Summary.Create != 4 || input.Digest == "" {
+	if input.Plan.Blocked || input.Plan.Summary.Create != 5 || input.Digest == "" {
 		t.Fatalf("plan = %#v digest=%q", input.Plan, input.Digest)
 	}
 	var planOutput bytes.Buffer
 	if err := writeFleetPlan(&planOutput, input.Plan, input.Digest); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(planOutput.String(), "env://") || !strings.Contains(planOutput.String(), input.Digest) {
+	if strings.Contains(planOutput.String(), "env://") || strings.Contains(planOutput.String(), "cli-import-secret-value") || !strings.Contains(planOutput.String(), input.Digest) {
 		t.Fatalf("unexpected plan output: %s", planOutput.String())
 	}
 
@@ -126,6 +135,9 @@ max_staleness = "5m"
 	if applyCalls != 0 {
 		t.Fatal("apply request was sent without approval")
 	}
+	if err := os.Setenv("FLEET_IMPORTED_TOKEN", "cli-import-secret-value"); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyCmd.Flags().Set("plan-sha256", input.Digest); err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +148,12 @@ max_staleness = "5m"
 	}
 	if applyCalls != 1 || applied.ExpectedPlanSHA256 != input.Digest {
 		t.Fatalf("apply calls=%d request=%#v", applyCalls, applied)
+	}
+	if len(applied.Imports) != 1 || string(applied.Imports[0].Value) != "cli-import-secret-value" {
+		t.Fatalf("resolved imports = %#v", applied.Imports)
+	}
+	if strings.Contains(applyOutput.String(), "cli-import-secret-value") {
+		t.Fatalf("apply output leaked imported value: %s", applyOutput.String())
 	}
 	credential := applied.Manifest.Vaults[0].Credentials[0]
 	if credential.Reference != "canonical/application/token" || credential.ProviderKind != secretprovider.KindAWSSecretsManager {

@@ -16,7 +16,8 @@ type ProviderReferences interface {
 
 // LoadOptions supplies runtime context needed for validation.
 type LoadOptions struct {
-	Providers ProviderReferences
+	Providers       ProviderReferences
+	ImportProviders ProviderReferences
 }
 
 // Manifest is the canonical, merged desired state returned by LoadFiles.

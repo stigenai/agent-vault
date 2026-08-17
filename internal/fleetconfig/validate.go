@@ -178,6 +178,19 @@ func normalizeAndValidate(documents []rawManifest, options LoadOptions) (*Manife
 	}
 	sort.Slice(result.Agents, func(i, j int) bool { return result.Agents[i].Name < result.Agents[j].Name })
 	sort.Slice(result.Vaults, func(i, j int) bool { return result.Vaults[i].Name < result.Vaults[j].Name })
+	stdinOwner := ""
+	for _, vault := range result.Vaults {
+		for _, item := range vault.Imports {
+			if item.From != "stdin://" {
+				continue
+			}
+			owner := vault.Name + "/" + item.Name
+			if stdinOwner != "" {
+				return nil, fmt.Errorf("stdin import may be declared only once (used by %q and %q)", stdinOwner, owner)
+			}
+			stdinOwner = owner
+		}
+	}
 	return result, nil
 }
 
@@ -328,7 +341,11 @@ func validateImport(vault string, raw rawImport, options LoadOptions) (Import, e
 	if result.Source == "" || result.Reference == "" {
 		return Import{}, fmt.Errorf("vault %q import %q: source and ref must be set together", vault, result.Name)
 	}
-	reference, err := parseProviderReference(options, result.Source, result.Reference)
+	providers := options.ImportProviders
+	if providers == nil {
+		providers = options.Providers
+	}
+	reference, err := parseProviderReferenceWith(providers, result.Source, result.Reference)
 	if err != nil {
 		return Import{}, fmt.Errorf("vault %q import %q: provider reference is invalid", vault, result.Name)
 	}
@@ -338,7 +355,11 @@ func validateImport(vault string, raw rawImport, options LoadOptions) (Import, e
 }
 
 func parseProviderReference(options LoadOptions, source, raw string) (secretprovider.Reference, error) {
-	if options.Providers == nil {
+	return parseProviderReferenceWith(options.Providers, source, raw)
+}
+
+func parseProviderReferenceWith(providers ProviderReferences, source, raw string) (secretprovider.Reference, error) {
+	if providers == nil {
 		return nil, fmt.Errorf("provider registry is required")
 	}
 	if raw == "" || strings.TrimSpace(raw) != raw || len(raw) > secretprovider.MaxReferenceBytes ||
@@ -351,7 +372,7 @@ func parseProviderReference(options LoadOptions, source, raw string) (secretprov
 			return nil, fmt.Errorf("unsupported provider reference")
 		}
 	}
-	return options.Providers.Parse(source, raw)
+	return providers.Parse(source, raw)
 }
 
 func validateLocalImport(raw string) error {

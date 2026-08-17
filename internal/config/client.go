@@ -14,6 +14,14 @@ type RelayClient struct {
 	Relay  Relay
 }
 
+// FleetClient is the least-privilege CLI configuration needed for direct
+// fleet imports. It deliberately excludes database, SMTP, encryption, and
+// other server-side secret references.
+type FleetClient struct {
+	Client          Client
+	SecretProviders []SecretProviderConfig
+}
+
 // ClientOptions controls the lightweight CLI configuration load. Unlike Load,
 // it never resolves server-side secret references from the same TOML file.
 type ClientOptions struct {
@@ -75,6 +83,45 @@ func LoadClient(opts ClientOptions) (Client, error) {
 		return Client{}, err
 	}
 	return client, nil
+}
+
+// LoadFleetClient loads client connectivity plus one-time import providers
+// without resolving unrelated server configuration or secret references.
+func LoadFleetClient(opts ClientOptions) (FleetClient, error) {
+	client, err := LoadClient(opts)
+	if err != nil {
+		return FleetClient{}, err
+	}
+	lookup := opts.LookupEnv
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	result := FleetClient{Client: client}
+	path, required := discoverPath(Options{Path: opts.Path, DefaultPath: opts.DefaultPath}, lookup)
+	if path == "" {
+		return result, nil
+	}
+	partial, err := decodeFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && !required {
+			return result, nil
+		}
+		return FleetClient{}, fmt.Errorf("fleet client config %q: %w", path, err)
+	}
+	if partial.SecretProviders != nil {
+		result.SecretProviders = append([]SecretProviderConfig(nil), (*partial.SecretProviders)...)
+	}
+	auth := Auth{
+		Mode: "spiffe", WorkloadAPI: client.WorkloadAPI,
+		TrustDomains: append([]string(nil), client.TrustDomains...),
+	}
+	if client.WorkloadAPI == "" {
+		auth.Mode = "legacy"
+	}
+	if err := validateSecretProviders(result.SecretProviders, auth); err != nil {
+		return FleetClient{}, fmt.Errorf("invalid fleet client configuration: %w", err)
+	}
+	return result, nil
 }
 
 // LoadRelay reads only the public client and relay sections. It deliberately

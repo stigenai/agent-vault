@@ -69,6 +69,65 @@ func TestValidateManifestCanonicalizesTransportInput(t *testing.T) {
 	}
 }
 
+func TestImportProvidersAreValidatedSeparatelyFromDurableProviders(t *testing.T) {
+	path := writeManifest(t, "separate-providers.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "automation"
+
+[[vaults.credentials]]
+name = "LIVE_TOKEN"
+mode = "reference"
+source = "server-aws"
+ref = "live/token"
+refresh_interval = "1m"
+max_staleness = "5m"
+
+[[vaults.imports]]
+name = "IMPORTED_TOKEN"
+source = "cli-aws"
+ref = "one-time/token"
+`)
+	manifest, err := LoadFiles([]string{path}, LoadOptions{
+		Providers: testProviderCatalog{kinds: map[string]string{
+			"server-aws": secretprovider.KindAWSSecretsManager,
+		}},
+		ImportProviders: testProviderCatalog{kinds: map[string]string{
+			"cli-aws": secretprovider.KindAWSSecretsManager,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Vaults[0].Credentials[0].Reference != "canonical/live/token" ||
+		manifest.Vaults[0].Imports[0].Reference != "canonical/one-time/token" {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+}
+
+func TestLoadFilesRejectsMultipleStdinImports(t *testing.T) {
+	path := writeManifest(t, "multiple-stdin.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "automation"
+
+[[vaults.imports]]
+name = "FIRST"
+from = "stdin://"
+
+[[vaults.imports]]
+name = "SECOND"
+from = "stdin://"
+`)
+	if _, err := LoadFiles([]string{path}, testOptions()); err == nil || !strings.Contains(err.Error(), "stdin import may be declared only once") {
+		t.Fatalf("multiple stdin imports error = %v", err)
+	}
+}
+
 func writeManifest(t *testing.T, name, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)

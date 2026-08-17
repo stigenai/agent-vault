@@ -72,3 +72,36 @@ func TestLoadClientValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadFleetClientIncludesOnlyClientAndImportProviders(t *testing.T) {
+	path := writeConfig(t, "fleet-client.toml", `schema_version = 1
+[client]
+address = "https://agent-vault.example"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+
+[database]
+url = "env://DATABASE_SECRET_THAT_MUST_NOT_BE_READ"
+
+[[secret_providers]]
+name = "aws-production"
+kind = "aws-secrets-manager"
+region = "us-east-1"
+
+[[secret_providers]]
+name = "onepassword-production"
+kind = "onepassword-connect"
+address = "https://connect.example"
+token = "env://ONEPASSWORD_CONNECT_TOKEN"
+`)
+	loaded, err := LoadFleetClient(ClientOptions{Path: path, LookupEnv: mapEnv(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Client.WorkloadAPI != "unix:///run/spire/sockets/agent.sock" || len(loaded.SecretProviders) != 2 {
+		t.Fatalf("fleet client = %#v", loaded)
+	}
+	if loaded.SecretProviders[1].Token.String() != "env://ONEPASSWORD_CONNECT_TOKEN" {
+		t.Fatalf("provider token reference changed: %#v", loaded.SecretProviders[1])
+	}
+}

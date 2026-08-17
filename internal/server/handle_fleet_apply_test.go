@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	vaultcrypto "github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/fleetconfig"
 	"github.com/Infisical/agent-vault/internal/fleetplan"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
@@ -134,7 +135,11 @@ func TestFleetApplyRejectsInvalidOrUnresolvedInputBeforeMutation(t *testing.T) {
 			srv, ms, token := setupFleetApplyTest(t)
 			manifest := fleetApplyManifest()
 			test.mutate(manifest)
-			applyTestFleetPlan(t, srv, token, manifest, fleetplan.Options{}, "sha256:reviewed", http.StatusUnprocessableEntity)
+			digest := "sha256:reviewed"
+			if test.name == "unresolved direct import" {
+				_, digest = buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+			}
+			applyTestFleetPlan(t, srv, token, manifest, fleetplan.Options{}, digest, http.StatusUnprocessableEntity)
 			if len(ms.managedResources) != 0 {
 				t.Fatalf("apply mutated ownership before rejecting input: %#v", ms.managedResources)
 			}
@@ -142,6 +147,82 @@ func TestFleetApplyRejectsInvalidOrUnresolvedInputBeforeMutation(t *testing.T) {
 				t.Fatal("apply created a vault before rejecting input")
 			}
 		})
+	}
+}
+
+func TestFleetApplyImportsEncryptedCredentialWithoutLiveSource(t *testing.T) {
+	srv, ms, token := setupFleetApplyTest(t)
+	manifest := fleetApplyManifest()
+	manifest.Vaults[0].Credentials = nil
+	manifest.Vaults[0].Services = nil
+	manifest.Vaults[0].Imports = []fleetconfig.Import{{
+		Name: "GITHUB_TOKEN", Source: "cli-only-aws", Reference: "application/import-once",
+		ProviderKind: secretprovider.KindAWSSecretsManager,
+	}}
+	_, digest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	secretValue := []byte("imported-secret-that-must-not-leak")
+	response := applyTestFleetPlanWithImports(t, srv, token, manifest, digest, []fleetResolvedImport{{
+		Vault: "fleet-vault", Name: "GITHUB_TOKEN", Value: secretValue,
+	}}, http.StatusOK)
+	if len(response.Applied) != 4 {
+		t.Fatalf("response = %#v", response)
+	}
+	credential := ms.credentials["ns-fleet-vault:GITHUB_TOKEN"]
+	if credential == nil || string(credential.Ciphertext) == string(secretValue) {
+		t.Fatalf("credential was not encrypted: %#v", credential)
+	}
+	plaintext, err := vaultcrypto.Decrypt(credential.Ciphertext, credential.Nonce, srv.encKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultcrypto.WipeBytes(plaintext)
+	if string(plaintext) != string(secretValue) {
+		t.Fatal("decrypted import does not match")
+	}
+	if _, exists := ms.credentialSources["ns-fleet-vault:GITHUB_TOKEN"]; exists {
+		t.Fatal("one-time import retained a live source")
+	}
+
+	converged, convergedDigest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	if converged.Summary.Noop != 4 {
+		t.Fatalf("converged plan = %#v", converged)
+	}
+	idempotent := applyTestFleetPlanWithImports(t, srv, token, manifest, convergedDigest, nil, http.StatusOK)
+	if len(idempotent.Applied) != 0 {
+		t.Fatalf("idempotent apply mutated resources: %#v", idempotent)
+	}
+}
+
+func TestFleetApplyImportUpdateDetachesExistingLiveSource(t *testing.T) {
+	srv, ms, token := setupFleetApplyTest(t)
+	manifest := fleetApplyManifest()
+	_, digest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	applyTestFleetPlan(t, srv, token, manifest, fleetplan.Options{}, digest, http.StatusOK)
+	if _, exists := ms.credentialSources["ns-fleet-vault:GITHUB_TOKEN"]; !exists {
+		t.Fatal("reference credential source was not created")
+	}
+
+	manifest.Vaults[0].Credentials = nil
+	manifest.Vaults[0].Imports = []fleetconfig.Import{{Name: "GITHUB_TOKEN", From: "env://GITHUB_TOKEN"}}
+	update, updateDigest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	if update.Summary.Update != 1 {
+		t.Fatalf("import update plan = %#v", update)
+	}
+	value := []byte("replacement-import")
+	applyTestFleetPlanWithImports(t, srv, token, manifest, updateDigest, []fleetResolvedImport{{
+		Vault: "fleet-vault", Name: "GITHUB_TOKEN", Value: value,
+	}}, http.StatusOK)
+	if _, exists := ms.credentialSources["ns-fleet-vault:GITHUB_TOKEN"]; exists {
+		t.Fatal("import update retained the old live source")
+	}
+	credential := ms.credentials["ns-fleet-vault:GITHUB_TOKEN"]
+	plaintext, err := vaultcrypto.Decrypt(credential.Ciphertext, credential.Nonce, srv.encKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultcrypto.WipeBytes(plaintext)
+	if string(plaintext) != string(value) {
+		t.Fatal("import update did not replace the credential")
 	}
 }
 
@@ -246,7 +327,21 @@ func buildTestFleetPlan(t *testing.T, srv *Server, manifest *fleetconfig.Manifes
 func applyTestFleetPlan(t *testing.T, srv *Server, token string, manifest *fleetconfig.Manifest,
 	options fleetplan.Options, digest string, expectedStatus int) fleetApplyResponse {
 	t.Helper()
-	payload, err := json.Marshal(fleetApplyRequest{Manifest: manifest, Options: options, ExpectedPlanSHA256: digest})
+	return applyTestFleetPlanWithOptionsAndImports(t, srv, token, manifest, options, digest, nil, expectedStatus)
+}
+
+func applyTestFleetPlanWithImports(t *testing.T, srv *Server, token string, manifest *fleetconfig.Manifest,
+	digest string, imports []fleetResolvedImport, expectedStatus int) fleetApplyResponse {
+	t.Helper()
+	return applyTestFleetPlanWithOptionsAndImports(t, srv, token, manifest, fleetplan.Options{}, digest, imports, expectedStatus)
+}
+
+func applyTestFleetPlanWithOptionsAndImports(t *testing.T, srv *Server, token string, manifest *fleetconfig.Manifest,
+	options fleetplan.Options, digest string, imports []fleetResolvedImport, expectedStatus int) fleetApplyResponse {
+	t.Helper()
+	payload, err := json.Marshal(fleetApplyRequest{
+		Manifest: manifest, Options: options, ExpectedPlanSHA256: digest, Imports: imports,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

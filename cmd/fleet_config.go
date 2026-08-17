@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	vaultcrypto "github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/fleetconfig"
 	"github.com/Infisical/agent-vault/internal/fleetplan"
 	"github.com/Infisical/agent-vault/internal/fleetstate"
@@ -21,11 +22,12 @@ type fleetPlanOutput struct {
 }
 
 type fleetCommandInput struct {
-	Manifest *fleetconfig.Manifest
-	Options  fleetplan.Options
-	Plan     *fleetplan.Plan
-	Digest   string
-	Session  *session.ClientSession
+	Manifest        *fleetconfig.Manifest
+	Options         fleetplan.Options
+	Plan            *fleetplan.Plan
+	Digest          string
+	Session         *session.ClientSession
+	ImportProviders *fleetImportProviderSet
 }
 
 type remoteFleetReference struct {
@@ -78,6 +80,7 @@ var fleetConfigPlanCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer func() { _ = input.ImportProviders.Close() }()
 		return writeFleetPlan(cmd.OutOrStdout(), input.Plan, input.Digest)
 	},
 }
@@ -91,6 +94,7 @@ var fleetConfigApplyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer func() { _ = input.ImportProviders.Close() }()
 		if input.Plan.Blocked {
 			return fmt.Errorf("fleet plan %s is blocked by unmet prerequisites", input.Digest)
 		}
@@ -108,15 +112,22 @@ var fleetConfigApplyCmd = &cobra.Command{
 		if expected != input.Digest {
 			return fmt.Errorf("reviewed plan digest %s does not match current plan %s", expected, input.Digest)
 		}
+		imports, err := resolveFleetImports(cmd, input.Manifest, input.Plan, input.ImportProviders)
+		if err != nil {
+			return err
+		}
+		defer wipeFleetImportPayloads(imports)
 
 		payload, err := json.Marshal(struct {
-			Manifest           *fleetconfig.Manifest `json:"manifest"`
-			Options            fleetplan.Options     `json:"options"`
-			ExpectedPlanSHA256 string                `json:"expected_plan_sha256"`
-		}{input.Manifest, input.Options, expected})
+			Manifest           *fleetconfig.Manifest        `json:"manifest"`
+			Options            fleetplan.Options            `json:"options"`
+			ExpectedPlanSHA256 string                       `json:"expected_plan_sha256"`
+			Imports            []fleetResolvedImportPayload `json:"imports,omitempty"`
+		}{input.Manifest, input.Options, expected, imports})
 		if err != nil {
 			return fmt.Errorf("encode fleet apply request: %w", err)
 		}
+		defer vaultcrypto.WipeBytes(payload)
 		var responseBody []byte
 		err = withReauthRetry(input.Session, input.Session.Address, func(active *session.ClientSession) error {
 			var requestErr error
@@ -147,10 +158,12 @@ func buildFleetCommandInput(cmd *cobra.Command) (*fleetCommandInput, error) {
 	if err != nil {
 		return nil, err
 	}
+	importProviders := &fleetImportProviderSet{}
 	manifest, err := fleetconfig.LoadFiles(paths, fleetconfig.LoadOptions{
-		Providers: remoteFleetReferences{session: sess},
+		Providers: remoteFleetReferences{session: sess}, ImportProviders: importProviders,
 	})
 	if err != nil {
+		_ = importProviders.Close()
 		return nil, err
 	}
 	var current fleetstate.State
@@ -165,6 +178,7 @@ func buildFleetCommandInput(cmd *cobra.Command) (*fleetCommandInput, error) {
 		return nil
 	})
 	if err != nil {
+		_ = importProviders.Close()
 		return nil, err
 	}
 	options := fleetplan.Options{}
@@ -173,14 +187,17 @@ func buildFleetCommandInput(cmd *cobra.Command) (*fleetCommandInput, error) {
 	options.PruneCredentials, _ = cmd.Flags().GetBool("prune-credentials")
 	plan, err := fleetplan.Build(manifest, current, options)
 	if err != nil {
+		_ = importProviders.Close()
 		return nil, err
 	}
 	digest, err := fleetplan.Digest(plan)
 	if err != nil {
+		_ = importProviders.Close()
 		return nil, err
 	}
 	return &fleetCommandInput{
 		Manifest: manifest, Options: options, Plan: plan, Digest: digest, Session: sess,
+		ImportProviders: importProviders,
 	}, nil
 }
 

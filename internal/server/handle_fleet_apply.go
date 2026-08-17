@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/broker"
+	vaultcrypto "github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/fleetconfig"
 	"github.com/Infisical/agent-vault/internal/fleetplan"
+	"github.com/Infisical/agent-vault/internal/secretprovider"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -21,6 +24,18 @@ type fleetApplyRequest struct {
 	Manifest           *fleetconfig.Manifest `json:"manifest"`
 	Options            fleetplan.Options     `json:"options"`
 	ExpectedPlanSHA256 string                `json:"expected_plan_sha256"`
+	Imports            []fleetResolvedImport `json:"imports,omitempty"`
+}
+
+type fleetResolvedImport struct {
+	Vault string `json:"vault"`
+	Name  string `json:"name"`
+	Value []byte `json:"value"`
+}
+
+type fleetImportKey struct {
+	Vault string
+	Name  string
 }
 
 type fleetApplyResult struct {
@@ -64,6 +79,11 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request fleetApplyRequest
+	defer func() {
+		for i := range request.Imports {
+			vaultcrypto.WipeBytes(request.Imports[i].Value)
+		}
+	}()
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || request.Manifest == nil || request.ExpectedPlanSHA256 == "" {
@@ -74,16 +94,12 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "Invalid fleet apply request")
 		return
 	}
-	manifest, err := fleetconfig.ValidateManifest(*request.Manifest, fleetconfig.LoadOptions{Providers: s.secretProviders})
+	manifest, err := fleetconfig.ValidateManifest(*request.Manifest, fleetconfig.LoadOptions{
+		Providers: s.secretProviders, ImportProviders: fleetTransportImportProviders{manifest: request.Manifest},
+	})
 	if err != nil {
 		jsonError(w, http.StatusUnprocessableEntity, "Fleet manifest is invalid")
 		return
-	}
-	for _, vault := range manifest.Vaults {
-		if len(vault.Imports) != 0 {
-			jsonError(w, http.StatusUnprocessableEntity, "Fleet credential imports require resolved values")
-			return
-		}
 	}
 	current, err := s.buildFleetState(r.Context())
 	if err != nil {
@@ -106,13 +122,18 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	imports, err := validateResolvedFleetImports(manifest, plan, request.Imports)
+	if err != nil {
+		jsonError(w, http.StatusUnprocessableEntity, "Fleet credential imports are invalid")
+		return
+	}
 
 	response := fleetApplyResponse{PlanSHA256: digest}
 	for _, operation := range plan.Operations {
 		if operation.Action == fleetplan.ActionNoop || operation.Action == fleetplan.ActionRetain {
 			continue
 		}
-		if err := s.applyFleetOperation(r.Context(), actor, manifest, operation); err != nil {
+		if err := s.applyFleetOperation(r.Context(), actor, manifest, imports, operation); err != nil {
 			var conflict *store.ManagedResourceConflict
 			status := http.StatusInternalServerError
 			code := "apply_failed"
@@ -131,10 +152,10 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, response)
 }
 
-func (s *Server) applyFleetOperation(ctx context.Context, actor *Actor, manifest *fleetconfig.Manifest, operation fleetplan.Operation) error {
+func (s *Server) applyFleetOperation(ctx context.Context, actor *Actor, manifest *fleetconfig.Manifest, imports map[fleetImportKey][]byte, operation fleetplan.Operation) error {
 	switch operation.Action {
 	case fleetplan.ActionCreate:
-		return s.createFleetResource(ctx, actor, manifest, operation)
+		return s.createFleetResource(ctx, actor, manifest, imports, operation)
 	case fleetplan.ActionAdopt:
 		key, err := s.resolveManagedResourceKey(ctx, operation.Resource)
 		if err != nil {
@@ -150,7 +171,7 @@ func (s *Server) applyFleetOperation(ctx context.Context, actor *Actor, manifest
 		if _, err := s.store.CompareAndSwapManagedResource(ctx, key, manifest.Manager, operation.ExpectedRevision); err != nil {
 			return err
 		}
-		return s.mutateFleetResource(ctx, manifest, operation.Resource)
+		return s.mutateFleetResource(ctx, manifest, imports, operation.Resource)
 	case fleetplan.ActionDelete:
 		key, err := s.resolveManagedResourceKey(ctx, operation.Resource)
 		if err != nil {
@@ -169,7 +190,7 @@ func (s *Server) applyFleetOperation(ctx context.Context, actor *Actor, manifest
 	}
 }
 
-func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest *fleetconfig.Manifest, operation fleetplan.Operation) error {
+func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest *fleetconfig.Manifest, imports map[fleetImportKey][]byte, operation fleetplan.Operation) error {
 	ref := operation.Resource
 	var key store.ManagedResourceKey
 	switch ref.Kind {
@@ -213,7 +234,7 @@ func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest
 		if err != nil {
 			return err
 		}
-		if err := s.mutateFleetResource(ctx, manifest, ref); err != nil {
+		if err := s.mutateFleetResource(ctx, manifest, imports, ref); err != nil {
 			_ = s.deleteFleetResource(ctx, ref)
 			_ = s.store.ReleaseManagedResource(ctx, key, manifest.Manager, owned.Revision)
 			return err
@@ -222,7 +243,7 @@ func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest
 	}
 }
 
-func (s *Server) mutateFleetResource(ctx context.Context, manifest *fleetconfig.Manifest, ref fleetplan.ResourceRef) error {
+func (s *Server) mutateFleetResource(ctx context.Context, manifest *fleetconfig.Manifest, imports map[fleetImportKey][]byte, ref fleetplan.ResourceRef) error {
 	switch ref.Kind {
 	case store.ManagedResourceVault:
 		return nil
@@ -296,7 +317,22 @@ func (s *Server) mutateFleetResource(ctx context.Context, manifest *fleetconfig.
 			return errors.New("desired credential missing")
 		}
 		if imported {
-			return errors.New("credential import requires resolved value")
+			value, ok := imports[fleetImportKey{Vault: ref.Vault, Name: ref.Name}]
+			if !ok {
+				return errors.New("credential import requires resolved value")
+			}
+			ciphertext, nonce, err := vaultcrypto.Encrypt(value, s.encKey)
+			if err != nil {
+				return errors.New("credential import encryption failed")
+			}
+			vault, err := s.store.GetVault(ctx, ref.Vault)
+			if err != nil {
+				return err
+			}
+			if _, err := s.store.SetCredential(ctx, vault.ID, ref.Name, ciphertext, nonce); err != nil {
+				return err
+			}
+			return s.store.DeleteCredentialSource(ctx, vault.ID, ref.Name)
 		}
 		vault, err := s.store.GetVault(ctx, ref.Vault)
 		if err != nil {
@@ -467,3 +503,79 @@ func desiredCredential(manifest *fleetconfig.Manifest, vaultName, name string) (
 	}
 	return fleetconfig.Credential{}, false, false
 }
+
+func validateResolvedFleetImports(manifest *fleetconfig.Manifest, plan *fleetplan.Plan, values []fleetResolvedImport) (map[fleetImportKey][]byte, error) {
+	required := make(map[fleetImportKey]struct{})
+	for _, operation := range plan.Operations {
+		if operation.Resource.Kind != store.ManagedResourceCredential ||
+			(operation.Action != fleetplan.ActionCreate && operation.Action != fleetplan.ActionUpdate && operation.Action != fleetplan.ActionAdoptUpdate) {
+			continue
+		}
+		if _, imported, ok := desiredCredential(manifest, operation.Resource.Vault, operation.Resource.Name); ok && imported {
+			required[fleetImportKey{Vault: operation.Resource.Vault, Name: operation.Resource.Name}] = struct{}{}
+		}
+	}
+	resolved := make(map[fleetImportKey][]byte, len(values))
+	for _, item := range values {
+		key := fleetImportKey{Vault: item.Vault, Name: item.Name}
+		if _, ok := required[key]; !ok || item.Value == nil || len(item.Value) > secretprovider.MaxSecretBytes {
+			return nil, errors.New("unexpected import value")
+		}
+		if _, duplicate := resolved[key]; duplicate {
+			return nil, errors.New("duplicate import value")
+		}
+		resolved[key] = item.Value
+	}
+	if len(resolved) != len(required) {
+		return nil, errors.New("missing import value")
+	}
+	return resolved, nil
+}
+
+type fleetTransportImportProviders struct {
+	manifest *fleetconfig.Manifest
+}
+
+type fleetTransportImportReference struct {
+	kind      string
+	canonical string
+}
+
+func (r fleetTransportImportReference) ProviderKind() string { return r.kind }
+func (r fleetTransportImportReference) Canonical() string    { return r.canonical }
+
+var fleetProviderNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+func (p fleetTransportImportProviders) Parse(source, reference string) (secretprovider.Reference, error) {
+	if p.manifest == nil || !fleetProviderNamePattern.MatchString(source) {
+		return nil, secretprovider.NewError(secretprovider.CodeInvalidReference)
+	}
+	kind := ""
+	for _, vault := range p.manifest.Vaults {
+		for _, item := range vault.Imports {
+			if item.Source != source || item.Reference != reference {
+				continue
+			}
+			if !supportedFleetImportKind(item.ProviderKind) || kind != "" && kind != item.ProviderKind {
+				return nil, secretprovider.NewError(secretprovider.CodeInvalidReference)
+			}
+			kind = item.ProviderKind
+		}
+	}
+	if kind == "" {
+		return nil, secretprovider.NewError(secretprovider.CodeInvalidReference)
+	}
+	return fleetTransportImportReference{kind: kind, canonical: reference}, nil
+}
+
+func supportedFleetImportKind(kind string) bool {
+	switch kind {
+	case secretprovider.KindAWSSecretsManager, secretprovider.KindOpenBaoKV2, secretprovider.KindOnePassword:
+		return true
+	default:
+		return false
+	}
+}
+
+var _ fleetconfig.ProviderReferences = fleetTransportImportProviders{}
+var _ secretprovider.Reference = fleetTransportImportReference{}
