@@ -79,6 +79,13 @@ type SecretValue struct {
 	set   bool
 }
 
+// NewSecretValue creates a redacted value for compatibility inputs such as
+// command-line flags. TOML decoding never calls this function and continues
+// to require a typed reference.
+func NewSecretValue(value []byte) SecretValue {
+	return newSecretValue(SecretRef{}, value)
+}
+
 func newSecretValue(ref SecretRef, value []byte) SecretValue {
 	owned := append([]byte(nil), value...)
 	return SecretValue{ref: ref, value: owned, set: true}

@@ -165,15 +165,22 @@ func isBlockedIP(ip net.IP, allowPrivate bool, allowed []net.IPNet) bool {
 // blocked. When false, private/reserved ranges are also blocked unless
 // allowlisted via AGENT_VAULT_NETWORK_ALLOWLIST.
 func SafeDialContext(allowPrivate bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	var allowed []net.IPNet
+	if !allowPrivate {
+		allowed = AllowlistFromEnv()
+	}
+	return SafeDialContextWithAllowlist(allowPrivate, allowed)
+}
+
+// SafeDialContextWithAllowlist builds the same SSRF-safe dialer from resolved
+// configuration instead of consulting process environment.
+func SafeDialContextWithAllowlist(allowPrivate bool, allowed []net.IPNet) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
 
-	var allowed []net.IPNet
-	if !allowPrivate {
-		allowed = AllowlistFromEnv()
-	}
+	allowed = append([]net.IPNet(nil), allowed...)
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)

@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -92,7 +93,14 @@ type Encryption struct {
 }
 
 type SMTP struct {
-	Password SecretValue
+	Host          string
+	Port          int
+	Username      string
+	Password      SecretValue
+	From          string
+	FromName      string
+	TLSMode       string
+	TLSSkipVerify bool
 }
 
 type Logs struct {
@@ -162,7 +170,14 @@ type PartialEncryption struct {
 }
 
 type PartialSMTP struct {
-	Password *SecretRef `toml:"password"`
+	Host          *string    `toml:"host"`
+	Port          *int       `toml:"port"`
+	Username      *string    `toml:"username"`
+	Password      *SecretRef `toml:"password"`
+	From          *string    `toml:"from"`
+	FromName      *string    `toml:"from_name"`
+	TLSMode       *string    `toml:"tls_mode"`
+	TLSSkipVerify *bool      `toml:"tls_skip_verify"`
 }
 
 type PartialLogs struct {
@@ -209,6 +224,11 @@ func Defaults() Runtime {
 		Client: Client{
 			Address: "http://127.0.0.1:14321",
 		},
+		SMTP: SMTP{
+			Port:     587,
+			FromName: "Agent Vault",
+			TLSMode:  "opportunistic",
+		},
 		Logs: Logs{
 			MaxAge:          7 * 24 * time.Hour,
 			MaxRowsPerVault: 10000,
@@ -224,7 +244,8 @@ var fieldNames = []string{
 	"database.url", "database.sqlite_path", "database.max_open_conns", "database.max_idle_conns", "database.conn_max_lifetime",
 	"proxy.max_request_bytes", "proxy.max_response_bytes", "proxy.allow_private_ranges", "proxy.network_allowlist", "proxy.trusted_proxies",
 	"client.address", "client.vault", "client.workload_api", "client.trust_domains",
-	"encryption.legacy_master_password", "smtp.password",
+	"encryption.legacy_master_password",
+	"smtp.host", "smtp.port", "smtp.username", "smtp.password", "smtp.from", "smtp.from_name", "smtp.tls_mode", "smtp.tls_skip_verify",
 	"logs.max_age", "logs.max_rows_per_vault", "logs.retention_locked",
 	"rate_limit.profile", "rate_limit.locked",
 	"telemetry.enabled",
@@ -254,7 +275,7 @@ func (c Runtime) Validate() error {
 		return err
 	}
 	if c.Server.LogLevel != "info" && c.Server.LogLevel != "debug" {
-		return fmt.Errorf("server.log_level: must be info or debug")
+		return fmt.Errorf("server.log_level: invalid log level %q (accepted: info, debug)", c.Server.LogLevel)
 	}
 	if err := validHTTPURL("server.external_address", c.Server.ExternalAddress, true); err != nil {
 		return err
@@ -280,10 +301,10 @@ func (c Runtime) Validate() error {
 	if c.Proxy.MaxResponseBytes < 0 {
 		return fmt.Errorf("proxy.max_response_bytes: must be at least 0")
 	}
-	if err := validList("proxy.network_allowlist", c.Proxy.NetworkAllowlist); err != nil {
+	if err := validNetworkList("proxy.network_allowlist", c.Proxy.NetworkAllowlist); err != nil {
 		return err
 	}
-	if err := validList("proxy.trusted_proxies", c.Proxy.TrustedProxies); err != nil {
+	if err := validNetworkList("proxy.trusted_proxies", c.Proxy.TrustedProxies); err != nil {
 		return err
 	}
 	if err := validHTTPURL("client.address", c.Client.Address, false); err != nil {
@@ -296,6 +317,14 @@ func (c Runtime) Validate() error {
 		if !strings.HasPrefix(trustDomain, "spiffe://") {
 			return fmt.Errorf("client.trust_domains: %q must use spiffe://", trustDomain)
 		}
+	}
+	if err := validPort("smtp.port", c.SMTP.Port, false); err != nil {
+		return err
+	}
+	switch c.SMTP.TLSMode {
+	case "opportunistic", "required", "none":
+	default:
+		return fmt.Errorf("smtp.tls_mode: must be opportunistic, required, or none")
 	}
 	if c.Logs.MaxAge < 0 {
 		return fmt.Errorf("logs.max_age: must be at least 0")
@@ -336,6 +365,21 @@ func validList(name string, values []string) error {
 	for _, value := range values {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s: entries must not be empty", name)
+		}
+	}
+	return nil
+}
+
+func validNetworkList(name string, values []string) error {
+	if err := validList(name, values); err != nil {
+		return err
+	}
+	for _, value := range values {
+		if net.ParseIP(value) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(value); err != nil {
+			return fmt.Errorf("%s: %q must be an IP address or CIDR", name, value)
 		}
 	}
 	return nil

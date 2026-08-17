@@ -3,13 +3,18 @@ package store
 import (
 	"fmt"
 	"net/url"
+	"time"
 )
 
 // StoreConfig carries the parameters for OpenStore.
 // If DatabaseURL is non-empty it takes precedence over SQLitePath.
 type StoreConfig struct {
-	DatabaseURL string
-	SQLitePath  string
+	DatabaseURL     string
+	SQLitePath      string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	PoolConfigured  bool
 }
 
 // OpenStore opens a Store backed by either PostgreSQL or SQLite depending on
@@ -38,7 +43,7 @@ func OpenStore(cfg StoreConfig) (Store, error) {
 		return nil, fmt.Errorf("unrecognized DATABASE_URL scheme %q; supported: postgres://, postgresql://", scheme)
 	}
 
-	return openPostgres(cfg.DatabaseURL)
+	return openPostgres(cfg)
 }
 
 // RedactURL returns a URL string with the password replaced by "***".

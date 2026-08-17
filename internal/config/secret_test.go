@@ -149,6 +149,27 @@ func TestSecretValueFormattingAndSerializationAreRedacted(t *testing.T) {
 	}
 }
 
+func TestLiteralFlagSecretOverridesEnvironmentWithoutLeaking(t *testing.T) {
+	literal := NewSecretValue([]byte("postgres://flag-user:flag-secret@example/db"))
+	result, err := Load(Options{
+		DefaultPath: filepath.Join(t.TempDir(), "missing.toml"),
+		LookupEnv:   mapEnv(map[string]string{"DATABASE_URL": "postgres://environment/db"}),
+		FlagSecrets: FlagSecrets{DatabaseURL: &literal},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Config.Database.URL.RevealString(); got != "postgres://flag-user:flag-secret@example/db" {
+		t.Fatalf("database URL = %q", got)
+	}
+	if result.Sources["database.url"] != SourceFlag {
+		t.Fatalf("source = %q, want flag", result.Sources["database.url"])
+	}
+	if output := fmt.Sprintf("%#v", result.Config); strings.Contains(output, "flag-secret") {
+		t.Fatalf("flag secret leaked: %s", output)
+	}
+}
+
 func TestInlineTOMLSecretsAreRejectedWithoutEcho(t *testing.T) {
 	tests := []struct {
 		name, section, field, secret string

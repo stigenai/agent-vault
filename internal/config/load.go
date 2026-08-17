@@ -23,6 +23,15 @@ type Options struct {
 	LookupEnv   LookupEnv
 	Resolver    Resolver
 	Flags       Partial
+	FlagSecrets FlagSecrets
+}
+
+// FlagSecrets carries legacy literal secret flags without weakening the TOML
+// schema. Values format as [REDACTED] and win over all lower layers.
+type FlagSecrets struct {
+	DatabaseURL          *SecretValue
+	LegacyMasterPassword *SecretValue
+	SMTPPassword         *SecretValue
 }
 
 // Load resolves defaults < TOML < environment < flags and validates the
@@ -65,10 +74,26 @@ func Load(opts Options) (Result, error) {
 	if err := applyPartial(&result, opts.Flags, SourceFlag, resolver); err != nil {
 		return Result{}, fmt.Errorf("flag configuration: %w", err)
 	}
+	applyFlagSecrets(&result, opts.FlagSecrets)
 	if err := result.Config.Validate(); err != nil {
 		return Result{}, fmt.Errorf("invalid configuration: %w", err)
 	}
 	return result, nil
+}
+
+func applyFlagSecrets(result *Result, secrets FlagSecrets) {
+	if secrets.DatabaseURL != nil {
+		result.Config.Database.URL = *secrets.DatabaseURL
+		result.Sources["database.url"] = SourceFlag
+	}
+	if secrets.LegacyMasterPassword != nil {
+		result.Config.Encryption.LegacyMasterPassword = *secrets.LegacyMasterPassword
+		result.Sources["encryption.legacy_master_password"] = SourceFlag
+	}
+	if secrets.SMTPPassword != nil {
+		result.Config.SMTP.Password = *secrets.SMTPPassword
+		result.Sources["smtp.password"] = SourceFlag
+	}
 }
 
 func discoverPath(opts Options, lookup LookupEnv) (path string, required bool) {
@@ -183,6 +208,12 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 		return err
 	}
 	setString("AGENT_VAULT_ADDR", "server.external_address", &result.Config.Server.ExternalAddress)
+	if result.Config.Server.ExternalAddress == "" {
+		if app, ok := lookup("FLY_APP_NAME"); ok && strings.TrimSpace(app) != "" {
+			result.Config.Server.ExternalAddress = "https://" + app + ".fly.dev"
+			result.Sources["server.external_address"] = SourceEnvironment
+		}
+	}
 	setString("AGENT_VAULT_LOG_LEVEL", "server.log_level", &result.Config.Server.LogLevel)
 	if err := setBool("AGENT_VAULT_DETACH", "server.detach", &result.Config.Server.Detach); err != nil {
 		return err
@@ -225,10 +256,24 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 		result.Config.Encryption.LegacyMasterPassword = newSecretValue(ref, []byte(value))
 		result.Sources["encryption.legacy_master_password"] = SourceEnvironment
 	}
+	setString("AGENT_VAULT_SMTP_HOST", "smtp.host", &result.Config.SMTP.Host)
+	if err := setInt("AGENT_VAULT_SMTP_PORT", "smtp.port", &result.Config.SMTP.Port); err != nil {
+		return err
+	}
+	setString("AGENT_VAULT_SMTP_USERNAME", "smtp.username", &result.Config.SMTP.Username)
 	if value, ok := lookup("AGENT_VAULT_SMTP_PASSWORD"); ok {
 		ref, _ := ParseSecretRef("env://AGENT_VAULT_SMTP_PASSWORD")
 		result.Config.SMTP.Password = newSecretValue(ref, []byte(value))
 		result.Sources["smtp.password"] = SourceEnvironment
+	}
+	setString("AGENT_VAULT_SMTP_FROM", "smtp.from", &result.Config.SMTP.From)
+	setString("AGENT_VAULT_SMTP_FROM_NAME", "smtp.from_name", &result.Config.SMTP.FromName)
+	if value, ok := lookup("AGENT_VAULT_SMTP_TLS_MODE"); ok {
+		result.Config.SMTP.TLSMode = strings.ToLower(value)
+		result.Sources["smtp.tls_mode"] = SourceEnvironment
+	}
+	if err := setBool("AGENT_VAULT_SMTP_TLS_SKIP_VERIFY", "smtp.tls_skip_verify", &result.Config.SMTP.TLSSkipVerify); err != nil {
+		return err
 	}
 
 	if value, ok := lookup("AGENT_VAULT_LOGS_MAX_AGE_HOURS"); ok {
@@ -370,6 +415,18 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 		result.Config.Encryption.LegacyMasterPassword = value
 		set("encryption.legacy_master_password")
 	}
+	if v := partial.SMTP.Host; v != nil {
+		result.Config.SMTP.Host = *v
+		set("smtp.host")
+	}
+	if v := partial.SMTP.Port; v != nil {
+		result.Config.SMTP.Port = *v
+		set("smtp.port")
+	}
+	if v := partial.SMTP.Username; v != nil {
+		result.Config.SMTP.Username = *v
+		set("smtp.username")
+	}
 	if v := partial.SMTP.Password; v != nil {
 		value, err := resolver.Resolve(*v)
 		if err != nil {
@@ -377,6 +434,22 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 		}
 		result.Config.SMTP.Password = value
 		set("smtp.password")
+	}
+	if v := partial.SMTP.From; v != nil {
+		result.Config.SMTP.From = *v
+		set("smtp.from")
+	}
+	if v := partial.SMTP.FromName; v != nil {
+		result.Config.SMTP.FromName = *v
+		set("smtp.from_name")
+	}
+	if v := partial.SMTP.TLSMode; v != nil {
+		result.Config.SMTP.TLSMode = strings.ToLower(*v)
+		set("smtp.tls_mode")
+	}
+	if v := partial.SMTP.TLSSkipVerify; v != nil {
+		result.Config.SMTP.TLSSkipVerify = *v
+		set("smtp.tls_skip_verify")
 	}
 	if v := partial.Logs.MaxAge; v != nil {
 		result.Config.Logs.MaxAge = time.Duration(*v)

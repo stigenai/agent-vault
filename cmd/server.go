@@ -19,6 +19,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/auth"
 	"github.com/Infisical/agent-vault/internal/ca"
+	runtimeconfig "github.com/Infisical/agent-vault/internal/config"
 	"github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/infisical"
 	"github.com/Infisical/agent-vault/internal/mitm"
@@ -77,48 +78,51 @@ var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Start an Agent Vault server",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		port, _ := cmd.Flags().GetInt("port")
-		host, _ := cmd.Flags().GetString("host")
-		detach, _ := cmd.Flags().GetBool("detach")
-		mitmPort, _ := cmd.Flags().GetInt("mitm-port")
-		logLevelFlag, _ := cmd.Flags().GetString("log-level")
-		logLevelChanged := cmd.Flags().Changed("log-level")
-		maxRespBytes, _ := cmd.Flags().GetInt64("max-response-bytes")
-		maxReqBytes, _ := cmd.Flags().GetInt64("max-request-bytes")
-		addr := fmt.Sprintf("%s:%d", host, port)
-
-		logLevel, err := resolveLogLevel(logLevelFlag, logLevelChanged)
+		defer resetServerFlagChanges(cmd)
+		isDetachedChild := os.Getenv("_AGENT_VAULT_DETACHED") == "1"
+		if !isDetachedChild {
+			// Preserve the cheap legacy pre-flight before configuration or
+			// secret resolution.
+			if pid, err := pidfile.Read(); err == nil {
+				if pid != os.Getpid() && pidfile.IsRunning(pid) {
+					return fmt.Errorf("server is already running (PID %d). Use 'agent-vault server stop' to stop it first", pid)
+				}
+				_ = pidfile.Remove()
+			}
+		}
+		resolved, err := loadServerConfig(cmd)
 		if err != nil {
 			return err
 		}
-		logger := buildLogger(logLevel)
+		cfg := resolved.Config
+		port := cfg.Server.Port
+		host := cfg.Server.Host
+		detach := cfg.Server.Detach
+		mitmPort := cfg.Server.ProxyPort
+		addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+		logger := buildLogger(resolvedLogLevel(cfg.Server.LogLevel))
 
 		// --- Detached child path: read master key + initialized flag from stdin pipe ---
-		if os.Getenv("_AGENT_VAULT_DETACHED") == "1" {
-			return runDetachedChild(host, addr, mitmPort, logger, maxRespBytes, maxReqBytes)
-		}
-
-		// Pre-flight before unlocking the vault: don't make the user type a
-		// master password just to learn the port is taken.
-		if pid, err := pidfile.Read(); err == nil {
-			if pid != os.Getpid() && pidfile.IsRunning(pid) {
-				return fmt.Errorf("server is already running (PID %d). Use 'agent-vault server stop' to stop it first", pid)
+		if isDetachedChild {
+			if err := clearResolvedSecretEnvironment(cfg); err != nil {
+				return err
 			}
-			_ = pidfile.Remove()
+			return runDetachedChild(cfg, addr, logger)
+		}
+		if !detach {
+			if err := clearResolvedSecretEnvironment(cfg); err != nil {
+				return err
+			}
 		}
 
-		dbURL := os.Getenv("DATABASE_URL")
-		if flagURL, _ := cmd.Flags().GetString("database-url"); flagURL != "" {
-			dbURL = flagURL
-		}
-		dbPath, err := store.DefaultDBPath()
-		if err != nil && dbURL == "" {
-			return fmt.Errorf("resolving db path: %w", err)
-		}
+		dbURL := cfg.Database.URL.RevealString()
+		dbPath := cfg.Database.SQLitePath
 
 		db, err := store.OpenStore(store.StoreConfig{
-			DatabaseURL: dbURL,
-			SQLitePath:  dbPath,
+			DatabaseURL: dbURL, SQLitePath: dbPath,
+			MaxOpenConns: cfg.Database.MaxOpenConns, MaxIdleConns: cfg.Database.MaxIdleConns,
+			ConnMaxLifetime: cfg.Database.ConnMaxLifetime, PoolConfigured: true,
 		})
 		if err != nil {
 			return fmt.Errorf("opening store: %w", err)
@@ -137,11 +141,15 @@ var serverCmd = &cobra.Command{
 				}
 			}
 		}
+		if !detach {
+			cfg.Database.URL.Wipe()
+		}
 
 		passwordStdin, _ := cmd.Flags().GetBool("password-stdin")
-		interactive := !passwordStdin && os.Getenv("AGENT_VAULT_MASTER_PASSWORD") == ""
+		interactive := !passwordStdin && !cfg.Encryption.LegacyMasterPassword.IsSet()
 
-		masterKey, err := unlockOrSetup(cmd, db, passwordStdin)
+		masterKey, err := unlockOrSetup(cmd, db, passwordStdin, cfg.Encryption.LegacyMasterPassword)
+		cfg.Encryption.LegacyMasterPassword.Wipe()
 		if err != nil {
 			return err
 		}
@@ -164,28 +172,28 @@ var serverCmd = &cobra.Command{
 		}
 
 		if detach {
-			var explicitLogLevel *string
-			if logLevelChanged {
-				explicitLogLevel = &logLevelFlag
-			}
-			return spawnDetached(cmd, masterKey, initialized, host, port, mitmPort, addr, explicitLogLevel, maxRespBytes, maxReqBytes)
+			return spawnDetached(cmd, masterKey, initialized, cfg, addr)
 		}
 
 		// --- Foreground path ---
 		defer masterKey.Wipe()
-		baseURL := resolveBaseURL(addr)
-		smtpCfg := notify.LoadSMTPConfig()
-		_ = os.Unsetenv("AGENT_VAULT_SMTP_PASSWORD")
+		baseURL := resolvedBaseURL(cfg, addr)
+		smtpCfg := resolvedSMTP(cfg.SMTP)
+		cfg.SMTP.Password.Wipe()
 		notifier := notify.New(smtpCfg)
-		srv := server.New(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger)
+		srv := server.NewWithRuntime(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger, resolvedServerOptions(cfg))
 		srv.SetSkills(skillCLI)
-		srv.AttachTelemetry(tel)
-		shutdownLogs := attachLogSink(srv, db, logger)
+		if cfg.Telemetry.Enabled {
+			srv.AttachTelemetry(tel)
+		}
+		shutdownLogs := attachLogSink(srv, db, logger, cfg.Logs)
 		defer shutdownLogs()
-		if err := attachServerExtensions(srv, host, mitmPort, masterKey.Key(), db, logger, maxRespBytes, maxReqBytes); err != nil {
+		if err := attachServerExtensions(srv, cfg, masterKey.Key(), db, logger); err != nil {
 			return err
 		}
-		captureServerStart(mitmPort, db.DialectName())
+		if cfg.Telemetry.Enabled {
+			captureServerStart(mitmPort, db.DialectName())
+		}
 		return srv.Start()
 	},
 }
@@ -198,7 +206,8 @@ var serverCmd = &cobra.Command{
 // in server.Start: since the MITM proxy is default-on, environments that
 // cannot create ~/.agent-vault/ca/ (read-only FS, containers without HOME,
 // corrupted state) must still be able to run the core HTTP server.
-func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKey []byte, db store.Store, maxRespBytes, maxReqBytes int64) error {
+func attachMITMIfEnabled(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store) error {
+	host, mitmPort := cfg.Server.Host, cfg.Server.ProxyPort
 	if mitmPort <= 0 {
 		return nil
 	}
@@ -220,15 +229,18 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 	srv.AttachMITM(mitm.New(
 		net.JoinHostPort(host, strconv.Itoa(mitmPort)),
 		mitm.Options{
-			CA:               caProv,
-			Sessions:         srv.SessionResolver(),
-			Credentials:      srv.CredentialProvider(),
-			BaseURL:          srv.BaseURL(),
-			Logger:           srv.Logger(),
-			RateLimit:        srv.RateLimit(),
-			LogSink:          srv.LogSink(),
-			MaxResponseBytes: maxRespBytes,
-			MaxRequestBytes:  maxReqBytes,
+			CA:                      caProv,
+			Sessions:                srv.SessionResolver(),
+			Credentials:             srv.CredentialProvider(),
+			BaseURL:                 srv.BaseURL(),
+			Logger:                  srv.Logger(),
+			RateLimit:               srv.RateLimit(),
+			LogSink:                 srv.LogSink(),
+			MaxResponseBytes:        cfg.Proxy.MaxResponseBytes,
+			MaxRequestBytes:         cfg.Proxy.MaxRequestBytes,
+			AllowPrivateRanges:      cfg.Proxy.AllowPrivateRanges,
+			NetworkAllowlist:        parseNetworkList(cfg.Proxy.NetworkAllowlist, "proxy.network_allowlist"),
+			NetworkPolicyConfigured: true,
 		},
 	))
 	return nil
@@ -236,8 +248,8 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 
 // attachServerExtensions wires optional subsystems (MITM, Infisical) onto srv.
 // Both bootstrap paths (foreground and detached child) call this.
-func attachServerExtensions(srv *server.Server, host string, mitmPort int, masterKey []byte, db store.Store, logger *slog.Logger, maxRespBytes, maxReqBytes int64) error {
-	if err := attachMITMIfEnabled(srv, host, mitmPort, masterKey, db, maxRespBytes, maxReqBytes); err != nil {
+func attachServerExtensions(srv *server.Server, cfg runtimeconfig.Runtime, masterKey []byte, db store.Store, logger *slog.Logger) error {
+	if err := attachMITMIfEnabled(srv, cfg, masterKey, db); err != nil {
 		return err
 	}
 	attachInfisicalIfConfigured(srv, logger)
@@ -278,12 +290,14 @@ func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
 // batching feeds persistent storage, and a retention goroutine trims old
 // rows. Returns a shutdown function the caller runs after Start()
 // returns to flush pending records and stop retention.
-func attachLogSink(srv *server.Server, db store.Store, logger *slog.Logger) func() {
+func attachLogSink(srv *server.Server, db store.Store, logger *slog.Logger, cfg runtimeconfig.Logs) func() {
 	sink := requestlog.NewBatchSink(db, logger, requestlog.BatchSinkConfig{})
 	srv.AttachLogSink(sink)
 
 	retentionCtx, cancelRetention := context.WithCancel(context.Background())
-	go requestlog.RunRetention(retentionCtx, db, logger)
+	go requestlog.RunRetentionConfigured(retentionCtx, db, logger, requestlog.RetentionConfig{
+		MaxAge: cfg.MaxAge, MaxRowsPerVault: cfg.MaxRowsPerVault,
+	}, cfg.RetentionLocked)
 
 	return func() {
 		cancelRetention()
@@ -338,17 +352,14 @@ func promptOwnerSetup(cmd *cobra.Command, db store.Store, masterPassword []byte)
 	return nil
 }
 
-// unlockOrSetup resolves the master password and returns the DEK.
-// Priority: AGENT_VAULT_MASTER_PASSWORD envvar > --password-stdin > interactive prompt.
-// When no password is provided (envvar empty, no --password-stdin), sets up in passwordless mode.
-func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool) (*auth.MasterKey, error) {
-	// 1. AGENT_VAULT_MASTER_PASSWORD envvar (highest priority, for containerized/cloud deployments)
-	if envPw := os.Getenv("AGENT_VAULT_MASTER_PASSWORD"); envPw != "" {
-		_ = os.Unsetenv("AGENT_VAULT_MASTER_PASSWORD")
-		return unlockOrSetupWithPassword(db, []byte(envPw))
+// unlockOrSetup resolves the DEK from the already-resolved runtime config,
+// then --password-stdin, then the interactive compatibility flow.
+func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool, configuredPassword runtimeconfig.SecretValue) (*auth.MasterKey, error) {
+	if configuredPassword.IsSet() {
+		return unlockOrSetupWithPassword(db, configuredPassword.Bytes())
 	}
 
-	// 2. --password-stdin (non-interactive, single attempt)
+	// --password-stdin (non-interactive, single attempt)
 	if passwordStdin {
 		password, err := readPasswordFromStdin()
 		if err != nil {
@@ -357,7 +368,7 @@ func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool) (*aut
 		return unlockOrSetupWithPassword(db, password)
 	}
 
-	// 3. Interactive prompt
+	// Interactive prompt
 	ctx := context.Background()
 	record, err := db.GetMasterKeyRecord(ctx)
 	if err != nil {
@@ -571,7 +582,8 @@ func readPasswordFromStdin() ([]byte, error) {
 
 // runDetachedChild is the entry point for the detached child process.
 // It reads 33 bytes from stdin: 32-byte master key + 1-byte initialized flag.
-func runDetachedChild(host, addr string, mitmPort int, logger *slog.Logger, maxRespBytes, maxReqBytes int64) error {
+func runDetachedChild(cfg runtimeconfig.Runtime, addr string, logger *slog.Logger) error {
+	cfg.Encryption.LegacyMasterPassword.Wipe()
 	buf := make([]byte, 33)
 	if _, err := io.ReadFull(os.Stdin, buf); err != nil {
 		return fmt.Errorf("reading master key from pipe: %w", err)
@@ -579,42 +591,46 @@ func runDetachedChild(host, addr string, mitmPort int, logger *slog.Logger, maxR
 	key := buf[:32]
 	initialized := buf[32] == 1
 
-	dbURL := os.Getenv("DATABASE_URL")
-	dbPath, err := store.DefaultDBPath()
-	if err != nil && dbURL == "" {
-		return fmt.Errorf("resolving db path: %w", err)
-	}
+	dbURL := cfg.Database.URL.RevealString()
 
 	db, err := store.OpenStore(store.StoreConfig{
-		DatabaseURL: dbURL,
-		SQLitePath:  dbPath,
+		DatabaseURL: dbURL, SQLitePath: cfg.Database.SQLitePath,
+		MaxOpenConns: cfg.Database.MaxOpenConns, MaxIdleConns: cfg.Database.MaxIdleConns,
+		ConnMaxLifetime: cfg.Database.ConnMaxLifetime, PoolConfigured: true,
 	})
 	if err != nil {
 		return fmt.Errorf("opening store: %w", err)
 	}
+	cfg.Database.URL.Wipe()
 	defer func() { _ = db.Close() }()
 
-	baseURL := resolveBaseURL(addr)
-	smtpCfg := notify.LoadSMTPConfig()
-	_ = os.Unsetenv("AGENT_VAULT_SMTP_PASSWORD")
+	baseURL := resolvedBaseURL(cfg, addr)
+	smtpCfg := resolvedSMTP(cfg.SMTP)
+	cfg.SMTP.Password.Wipe()
 	notifier := notify.New(smtpCfg)
-	srv := server.New(addr, db, key, notifier, initialized, baseURL, logger)
+	srv := server.NewWithRuntime(addr, db, key, notifier, initialized, baseURL, logger, resolvedServerOptions(cfg))
 	srv.SetSkills(skillCLI)
-	srv.AttachTelemetry(tel)
-	shutdownLogs := attachLogSink(srv, db, logger)
+	if cfg.Telemetry.Enabled {
+		srv.AttachTelemetry(tel)
+	}
+	shutdownLogs := attachLogSink(srv, db, logger, cfg.Logs)
 	defer shutdownLogs()
-	if err := attachServerExtensions(srv, host, mitmPort, key, db, logger, maxRespBytes, maxReqBytes); err != nil {
+	if err := attachServerExtensions(srv, cfg, key, db, logger); err != nil {
 		return err
 	}
-	captureServerStart(mitmPort, db.DialectName())
+	if cfg.Telemetry.Enabled {
+		captureServerStart(cfg.Server.ProxyPort, db.DialectName())
+	}
 	return srv.Start()
 }
 
-// spawnDetached re-execs the server as a background process, passing the master key + initialized flag via a pipe.
-// explicitLogLevel, when non-nil, forwards the parent's --log-level flag to the child so a flag-only
-// invocation (no env var) still takes effect after re-exec.
-func spawnDetached(cmd *cobra.Command, masterKey *auth.MasterKey, initialized bool, host string, port, mitmPort int, addr string, explicitLogLevel *string, maxRespBytes, maxReqBytes int64) error {
+// spawnDetached re-execs the server as a background process, passing the
+// master key and initialized flag through a private pipe and forwarding the
+// resolved non-secret runtime flags.
+func spawnDetached(cmd *cobra.Command, masterKey *auth.MasterKey, initialized bool, cfg runtimeconfig.Runtime, addr string) error {
 	defer masterKey.Wipe()
+	defer cfg.Database.URL.Wipe()
+	defer cfg.SMTP.Password.Wipe()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -637,36 +653,43 @@ func spawnDetached(cmd *cobra.Command, masterKey *auth.MasterKey, initialized bo
 		return fmt.Errorf("opening log file: %w", err)
 	}
 
-	childArgs := []string{"server", "--port", strconv.Itoa(port), "--host", host, "--mitm-port", strconv.Itoa(mitmPort)}
-	if explicitLogLevel != nil {
-		childArgs = append(childArgs, "--log-level", *explicitLogLevel)
+	childArgs := []string{
+		"server", "--port", strconv.Itoa(cfg.Server.Port), "--host", cfg.Server.Host,
+		"--mitm-port", strconv.Itoa(cfg.Server.ProxyPort), "--log-level", cfg.Server.LogLevel,
+		"--max-response-bytes", strconv.FormatInt(cfg.Proxy.MaxResponseBytes, 10),
+		"--max-request-bytes", strconv.FormatInt(cfg.Proxy.MaxRequestBytes, 10),
 	}
-	childArgs = append(childArgs, "--max-response-bytes", strconv.FormatInt(maxRespBytes, 10))
-	childArgs = append(childArgs, "--max-request-bytes", strconv.FormatInt(maxReqBytes, 10))
+	if configPath, _ := cmd.Flags().GetString("config"); configPath != "" {
+		childArgs = append(childArgs, "--config", configPath)
+	}
 	child := exec.Command(exe, childArgs...)
 	child.Stdin = pr
 	child.Stdout = logFile
 	child.Stderr = logFile
-	flagURL, _ := cmd.Flags().GetString("database-url")
 	childEnv := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
-		if flagURL != "" && strings.HasPrefix(kv, "DATABASE_URL=") {
+		if strings.HasPrefix(kv, "DATABASE_URL=") {
 			continue
 		}
 		childEnv = append(childEnv, kv)
 	}
 	childEnv = append(childEnv, "_AGENT_VAULT_DETACHED=1")
-	if flagURL != "" {
-		childEnv = append(childEnv, "DATABASE_URL="+flagURL)
+	if dbURL := cfg.Database.URL.RevealString(); dbURL != "" {
+		childEnv = append(childEnv, "DATABASE_URL="+dbURL)
 	}
 	child.Env = childEnv
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := child.Start(); err != nil {
+		_ = clearResolvedSecretEnvironment(cfg)
 		_ = pr.Close()
 		_ = pw.Close()
 		_ = logFile.Close()
 		return fmt.Errorf("starting detached server: %w", err)
+	}
+	if err := clearResolvedSecretEnvironment(cfg); err != nil {
+		_ = child.Process.Kill()
+		return err
 	}
 
 	// Send the master key + initialized flag (33 bytes) to the child via the pipe.
@@ -770,6 +793,7 @@ func captureServerStart(mitmPort int, dbBackend string) {
 }
 
 func init() {
+	serverCmd.Flags().String("config", "", "path to versioned server TOML (also respects AGENT_VAULT_CONFIG)")
 	serverCmd.Flags().IntP("port", "p", defaultPort(), "port to listen on (also respects PORT env var)")
 	serverCmd.Flags().String("host", DefaultHost, "host to bind to")
 	serverCmd.Flags().String("database-url", "", "PostgreSQL connection URL (also respects DATABASE_URL env var)")

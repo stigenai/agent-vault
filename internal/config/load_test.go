@@ -44,7 +44,14 @@ trust_domains = ["spiffe://toml.example"]
 legacy_master_password = "env://TOML_MASTER_PASSWORD"
 
 [smtp]
+host = "smtp.toml.example"
+port = 2465
+username = "toml-user"
 password = "file:///toml/smtp-password"
+from = "vault@toml.example"
+from_name = "TOML Vault"
+tls_mode = "required"
+tls_skip_verify = true
 
 [logs]
 max_age = "48h"
@@ -66,6 +73,7 @@ func TestDefaults(t *testing.T) {
 		Database:      Database{MaxOpenConns: 25, MaxIdleConns: 10, ConnMaxLifetime: 5 * time.Minute},
 		Proxy:         Proxy{MaxRequestBytes: 1 << 30},
 		Client:        Client{Address: "http://127.0.0.1:14321"},
+		SMTP:          SMTP{Port: 587, FromName: "Agent Vault", TLSMode: "opportunistic"},
 		Logs:          Logs{MaxAge: 7 * 24 * time.Hour, MaxRowsPerVault: 10000},
 		RateLimit:     RateLimit{Profile: "default"},
 		Telemetry:     Telemetry{Enabled: true},
@@ -110,10 +118,14 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 			WorkloadAPI: "unix:///toml/spire.sock", TrustDomains: []string{"spiffe://toml.example"},
 		},
 		Encryption: Encryption{LegacyMasterPassword: secretValue("env://TOML_MASTER_PASSWORD", "toml-master-password")},
-		SMTP:       SMTP{Password: secretValue("file:///toml/smtp-password", "toml-smtp-password")},
-		Logs:       Logs{MaxAge: 48 * time.Hour, MaxRowsPerVault: 20000, RetentionLocked: true},
-		RateLimit:  RateLimit{Profile: "strict", Locked: true},
-		Telemetry:  Telemetry{Enabled: false},
+		SMTP: SMTP{
+			Host: "smtp.toml.example", Port: 2465, Username: "toml-user",
+			Password: secretValue("file:///toml/smtp-password", "toml-smtp-password"),
+			From:     "vault@toml.example", FromName: "TOML Vault", TLSMode: "required", TLSSkipVerify: true,
+		},
+		Logs:      Logs{MaxAge: 48 * time.Hour, MaxRowsPerVault: 20000, RetentionLocked: true},
+		RateLimit: RateLimit{Profile: "strict", Locked: true},
+		Telemetry: Telemetry{Enabled: false},
 	}
 	if !reflect.DeepEqual(got.Config, want) {
 		t.Fatalf("loaded config mismatch\n got: %#v\nwant: %#v", got.Config, want)
@@ -147,7 +159,11 @@ func TestLoadPrecedenceEveryField(t *testing.T) {
 		"AGENT_VAULT_VAULT":           "env-vault", "SPIFFE_ENDPOINT_SOCKET": "unix:///env/spire.sock",
 		"AGENT_VAULT_SPIFFE_TRUST_DOMAINS": "spiffe://env.example",
 		"AGENT_VAULT_MASTER_PASSWORD":      "env-master-password", "AGENT_VAULT_SMTP_PASSWORD": "env-smtp-password",
-		"AGENT_VAULT_LOGS_MAX_AGE_HOURS": "72", "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT": "30000",
+		"AGENT_VAULT_SMTP_HOST": "smtp.env.example", "AGENT_VAULT_SMTP_PORT": "3587",
+		"AGENT_VAULT_SMTP_USERNAME": "env-user", "AGENT_VAULT_SMTP_FROM": "vault@env.example",
+		"AGENT_VAULT_SMTP_FROM_NAME": "Env Vault", "AGENT_VAULT_SMTP_TLS_MODE": "none",
+		"AGENT_VAULT_SMTP_TLS_SKIP_VERIFY": "false",
+		"AGENT_VAULT_LOGS_MAX_AGE_HOURS":   "72", "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT": "30000",
 		"AGENT_VAULT_LOGS_RETENTION_LOCK": "false", "AGENT_VAULT_RATELIMIT_PROFILE": "loose",
 		"AGENT_VAULT_RATELIMIT_LOCK": "false", "AGENT_VAULT_TELEMETRY": "true",
 	}
@@ -227,6 +243,22 @@ func TestMissingFiles(t *testing.T) {
 		if _, err := Load(tc); err == nil || !strings.Contains(err.Error(), "no such file") {
 			t.Fatalf("required missing file error = %v", err)
 		}
+	}
+}
+
+func TestFlyAppNameRemainsExternalAddressFallback(t *testing.T) {
+	result, err := Load(Options{
+		DefaultPath: filepath.Join(t.TempDir(), "missing.toml"),
+		LookupEnv:   mapEnv(map[string]string{"FLY_APP_NAME": "fleet-vault"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Config.Server.ExternalAddress; got != "https://fleet-vault.fly.dev" {
+		t.Fatalf("external address = %q", got)
+	}
+	if result.Sources["server.external_address"] != SourceEnvironment {
+		t.Fatalf("source = %q", result.Sources["server.external_address"])
 	}
 }
 
@@ -314,6 +346,8 @@ func allFlagOverrides() Partial {
 	dbURL, sqlitePath, open, idle := mustSecretRef("env://FLAG_DATABASE_URL"), "", 60, 40
 	masterPassword := mustSecretRef("env://FLAG_MASTER_PASSWORD")
 	smtpPassword := mustSecretRef("env://FLAG_SMTP_PASSWORD")
+	smtpHost, smtpPort, smtpUsername := "smtp.flag.example", 4465, "flag-user"
+	smtpFrom, smtpFromName, smtpTLSMode, smtpSkipVerify := "vault@flag.example", "Flag Vault", "required", true
 	lifetime := Duration(30 * time.Minute)
 	requestBytes, responseBytes, private := int64(4000), int64(2500), true
 	allowlist, proxies := []string{"10.10.0.0/16"}, []string{"203.0.113.1"}
@@ -328,10 +362,13 @@ func allFlagOverrides() Partial {
 		Proxy:         PartialProxy{MaxRequestBytes: &requestBytes, MaxResponseBytes: &responseBytes, AllowPrivateRanges: &private, NetworkAllowlist: &allowlist, TrustedProxies: &proxies},
 		Client:        PartialClient{Address: &address, Vault: &vault, WorkloadAPI: &socket, TrustDomains: &trustDomains},
 		Encryption:    PartialEncryption{LegacyMasterPassword: &masterPassword},
-		SMTP:          PartialSMTP{Password: &smtpPassword},
-		Logs:          PartialLogs{MaxAge: &maxAge, MaxRowsPerVault: &rows, RetentionLocked: &retention},
-		RateLimit:     PartialRateLimit{Profile: &profile, Locked: &locked},
-		Telemetry:     PartialTelemetry{Enabled: &telemetry},
+		SMTP: PartialSMTP{
+			Host: &smtpHost, Port: &smtpPort, Username: &smtpUsername, Password: &smtpPassword,
+			From: &smtpFrom, FromName: &smtpFromName, TLSMode: &smtpTLSMode, TLSSkipVerify: &smtpSkipVerify,
+		},
+		Logs:      PartialLogs{MaxAge: &maxAge, MaxRowsPerVault: &rows, RetentionLocked: &retention},
+		RateLimit: PartialRateLimit{Profile: &profile, Locked: &locked},
+		Telemetry: PartialTelemetry{Enabled: &telemetry},
 	}
 }
 
@@ -343,10 +380,14 @@ func flagRuntime() Runtime {
 		Proxy:         Proxy{MaxRequestBytes: 4000, MaxResponseBytes: 2500, AllowPrivateRanges: true, NetworkAllowlist: []string{"10.10.0.0/16"}, TrustedProxies: []string{"203.0.113.1"}},
 		Client:        Client{Address: "https://flag-client.example", Vault: "flag-vault", WorkloadAPI: "unix:///flag/spire.sock", TrustDomains: []string{"spiffe://flag.example"}},
 		Encryption:    Encryption{LegacyMasterPassword: secretValue("env://FLAG_MASTER_PASSWORD", "flag-master-password")},
-		SMTP:          SMTP{Password: secretValue("env://FLAG_SMTP_PASSWORD", "flag-smtp-password")},
-		Logs:          Logs{MaxAge: 96 * time.Hour, MaxRowsPerVault: 40000, RetentionLocked: true},
-		RateLimit:     RateLimit{Profile: "off", Locked: true},
-		Telemetry:     Telemetry{Enabled: false},
+		SMTP: SMTP{
+			Host: "smtp.flag.example", Port: 4465, Username: "flag-user",
+			Password: secretValue("env://FLAG_SMTP_PASSWORD", "flag-smtp-password"),
+			From:     "vault@flag.example", FromName: "Flag Vault", TLSMode: "required", TLSSkipVerify: true,
+		},
+		Logs:      Logs{MaxAge: 96 * time.Hour, MaxRowsPerVault: 40000, RetentionLocked: true},
+		RateLimit: RateLimit{Profile: "off", Locked: true},
+		Telemetry: Telemetry{Enabled: false},
 	}
 }
 

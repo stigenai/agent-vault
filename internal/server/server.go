@@ -59,18 +59,21 @@ type agentVaultJSON struct {
 
 // Server is the Agent Vault HTTP server.
 type Server struct {
-	httpServer  *http.Server
-	store       Store
-	encKey      []byte // 32-byte encryption key, held in memory while running
-	notifier    *notify.Notifier
-	initialized    bool                // true when at least one owner account exists
-	lastInitCheck  atomic.Int64        // unix-millis of last DB check for initialization (throttle)
-	baseURL     string              // externally-reachable base URL (e.g. "https://sb.example.com")
-	skillCLI    []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
-	mitm        *mitm.Proxy         // transparent MITM proxy; nil only when --mitm-port 0
-	logger      *slog.Logger        // structured logger for per-request observability
-	rateLimit   *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
-	logSink     requestlog.Sink     // per-request persistence sink; never nil (Nop default)
+	httpServer        *http.Server
+	store             Store
+	encKey            []byte // 32-byte encryption key, held in memory while running
+	notifier          *notify.Notifier
+	initialized       bool                // true when at least one owner account exists
+	lastInitCheck     atomic.Int64        // unix-millis of last DB check for initialization (throttle)
+	baseURL           string              // externally-reachable base URL (e.g. "https://sb.example.com")
+	skillCLI          []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
+	mitm              *mitm.Proxy         // transparent MITM proxy; nil only when --mitm-port 0
+	logger            *slog.Logger        // structured logger for per-request observability
+	rateLimit         *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
+	rateLimitBase     ratelimit.Config
+	rateLimitEnvMasks ratelimit.EnvMasks
+	trustedProxyCIDRs []net.IPNet
+	logSink           requestlog.Sink // per-request persistence sink; never nil (Nop default)
 	// touchCache short-circuits per-request session-touch writes. With
 	// db.SetMaxOpenConns(1), every UPDATE — even a no-op — opens the
 	// single WAL writer slot. Caching the last-touch wall-clock per
@@ -763,11 +766,30 @@ func limitBody(next http.HandlerFunc) http.HandlerFunc {
 // The initialized parameter indicates whether at least one owner account exists.
 // When false, all endpoints except /health and POST /v1/init return 503.
 // logger must be non-nil; tests can pass slog.New(slog.DiscardHandler).
-func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
-	mux := http.NewServeMux()
+type RuntimeOptions struct {
+	RateLimit          ratelimit.Config
+	RateLimitEnvMasks  ratelimit.EnvMasks
+	AllowPrivateRanges bool
+	NetworkAllowlist   []net.IPNet
+	TrustedProxies     []net.IPNet
+}
 
-	rlCfg, _ := ratelimit.LoadFromEnv()
-	rl := ratelimit.New(rlCfg)
+func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
+	rlCfg, masks := ratelimit.LoadFromEnv()
+	return NewWithRuntime(addr, store, encKey, notifier, initialized, baseURL, logger, RuntimeOptions{
+		RateLimit:          rlCfg,
+		RateLimitEnvMasks:  masks,
+		AllowPrivateRanges: netguard.AllowPrivateFromEnv(),
+		NetworkAllowlist:   netguard.AllowlistFromEnv(),
+		TrustedProxies:     netguard.ParseCIDRList(os.Getenv("AGENT_VAULT_TRUSTED_PROXIES"), "AGENT_VAULT_TRUSTED_PROXIES"),
+	})
+}
+
+// NewWithRuntime constructs a server exclusively from resolved inputs. New
+// remains as an environment-compatible wrapper for embedders.
+func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger, opts RuntimeOptions) *Server {
+	mux := http.NewServeMux()
+	rl := ratelimit.New(opts.RateLimit)
 
 	s := &Server{
 		httpServer: &http.Server{
@@ -778,21 +800,24 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
-		store:          store,
-		encKey:         encKey,
-		notifier:       notifier,
-		initialized:    initialized,
-		baseURL:        strings.TrimRight(baseURL, "/"),
-		logger:         logger,
-		rateLimit:      rl,
-		logSink:        requestlog.Nop{},
-		oauthRefresher: oauth.NewRefresher(),
+		store:             store,
+		encKey:            encKey,
+		notifier:          notifier,
+		initialized:       initialized,
+		baseURL:           strings.TrimRight(baseURL, "/"),
+		logger:            logger,
+		rateLimit:         rl,
+		rateLimitBase:     opts.RateLimit,
+		rateLimitEnvMasks: opts.RateLimitEnvMasks,
+		trustedProxyCIDRs: append([]net.IPNet(nil), opts.TrustedProxies...),
+		logSink:           requestlog.Nop{},
+		oauthRefresher:    oauth.NewRefresher(),
 	}
 
 	// Apply SSRF protection to OAuth token endpoint requests.
 	oauthTransport := http.DefaultTransport.(*http.Transport).Clone()
 	oauthTransport.Proxy = nil
-	oauthTransport.DialContext = netguard.SafeDialContext(netguard.AllowPrivateFromEnv())
+	oauthTransport.DialContext = netguard.SafeDialContextWithAllowlist(opts.AllowPrivateRanges, opts.NetworkAllowlist)
 	oauth.TokenClient = &http.Client{Timeout: 30 * time.Second, Transport: oauthTransport}
 
 	ipAuth := s.tier(ratelimit.TierAuth, s.ipKeyer())
@@ -836,10 +861,10 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/approve", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalApprove)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/reject", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalReject)))))
 
-	ipUserInviteToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(clientIP, func(r *http.Request) string {
+	ipUserInviteToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(s.clientIP, func(r *http.Request) string {
 		return r.PathValue("token")
 	}))
-	ipApprovalToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(clientIP, func(r *http.Request) string {
+	ipApprovalToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(s.clientIP, func(r *http.Request) string {
 		return r.URL.Query().Get("token")
 	}))
 
@@ -1185,18 +1210,10 @@ const (
 	userSessionIdleTTL     = 30 * 24 * time.Hour
 )
 
-// trustedProxyCIDRs holds parsed CIDR ranges from AGENT_VAULT_TRUSTED_PROXIES.
-// When non-empty, X-Forwarded-For is only trusted if RemoteAddr matches one of these.
-var trustedProxyCIDRs []net.IPNet
-
-func init() {
-	trustedProxyCIDRs = netguard.ParseCIDRList(os.Getenv("AGENT_VAULT_TRUSTED_PROXIES"), "AGENT_VAULT_TRUSTED_PROXIES")
-}
-
 // ipKeyer returns a ratelimit.Keyer that keys on the request's client IP
 // (honoring AGENT_VAULT_TRUSTED_PROXIES via clientIP).
 func (s *Server) ipKeyer() ratelimit.Keyer {
-	return ratelimit.IPKey(clientIP)
+	return ratelimit.IPKey(s.clientIP)
 }
 
 // actorKeyer returns a ratelimit.Keyer that keys on the authenticated
@@ -1255,7 +1272,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		s.maybeTouchSession(r.Context(), sess, token, clientIP(r), r.UserAgent())
+		s.maybeTouchSession(r.Context(), sess, token, s.clientIP(r), r.UserAgent())
 
 		ctx := context.WithValue(r.Context(), sessionContextKey, sess)
 		next(w, r.WithContext(ctx))

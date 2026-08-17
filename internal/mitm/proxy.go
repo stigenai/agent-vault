@@ -28,8 +28,8 @@ package mitm
 
 import (
 	"context"
-	"log/slog"
 	"crypto/tls"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -66,22 +66,29 @@ type Proxy struct {
 // server so proxy limits and control-plane limits live in one registry;
 // nil disables rate limiting on the MITM path.
 type Options struct {
-	CA               ca.Provider
-	Sessions         brokercore.SessionResolver
-	Credentials      brokercore.CredentialProvider
-	BaseURL          string
-	Logger           *slog.Logger
-	RateLimit        *ratelimit.Registry
-	LogSink          requestlog.Sink // nil → Nop
-	MaxResponseBytes int64           // 0 = unlimited (default); >0 = cap in bytes
-	MaxRequestBytes  int64           // 0 → DefaultMaxRequestBytes (1 GiB)
+	CA                      ca.Provider
+	Sessions                brokercore.SessionResolver
+	Credentials             brokercore.CredentialProvider
+	BaseURL                 string
+	Logger                  *slog.Logger
+	RateLimit               *ratelimit.Registry
+	LogSink                 requestlog.Sink // nil → Nop
+	MaxResponseBytes        int64           // 0 = unlimited (default); >0 = cap in bytes
+	MaxRequestBytes         int64           // 0 → DefaultMaxRequestBytes (1 GiB)
+	AllowPrivateRanges      bool
+	NetworkAllowlist        []net.IPNet
+	NetworkPolicyConfigured bool
 }
 
 // New builds a Proxy bound to addr. The returned Proxy does not begin
 // listening until ListenAndServe is called.
 func New(addr string, opts Options) *Proxy {
+	dialContext := netguard.SafeDialContext(netguard.AllowPrivateFromEnv())
+	if opts.NetworkPolicyConfigured {
+		dialContext = netguard.SafeDialContextWithAllowlist(opts.AllowPrivateRanges, opts.NetworkAllowlist)
+	}
 	upstream := &http.Transport{
-		DialContext:           netguard.SafeDialContext(netguard.AllowPrivateFromEnv()),
+		DialContext:           dialContext,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          100,
