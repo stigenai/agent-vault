@@ -23,6 +23,25 @@ type AgentLookup interface {
 	GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*store.Agent, error)
 }
 
+// AuthorizeTrustDomains permits any verified SPIFFE peer in one of the exact
+// configured trust domains. It is intended for CLI-to-server authentication;
+// server-side agent authorization remains exact-ID based.
+func AuthorizeTrustDomains(trustDomains ...spiffeid.TrustDomain) tlsconfig.Authorizer {
+	allowed := make(map[spiffeid.TrustDomain]struct{}, len(trustDomains))
+	for _, trustDomain := range trustDomains {
+		allowed[trustDomain] = struct{}{}
+	}
+	return func(id spiffeid.ID, verifiedChains [][]*x509.Certificate) error {
+		if len(allowed) == 0 || len(verifiedChains) == 0 {
+			return fmt.Errorf("SPIFFE peer trust domain is not authorized")
+		}
+		if _, ok := allowed[id.TrustDomain()]; !ok {
+			return fmt.Errorf("SPIFFE peer trust domain is not authorized")
+		}
+		return nil
+	}
+}
+
 // AuthorizeAgents returns a handshake authorizer that permits only exact,
 // active agent identities in one of the configured trust domains. Certificate
 // chain validation is performed by go-spiffe before this callback is invoked.

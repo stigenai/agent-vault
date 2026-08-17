@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
-	"time"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Infisical/agent-vault/internal/isolation"
 	"github.com/Infisical/agent-vault/internal/session"
@@ -123,6 +123,9 @@ func runCmdRunE(cmd *cobra.Command, args []string) error {
 	sess, tokenSource, err := resolveSession()
 	if err != nil {
 		return err
+	}
+	if sess.WorkloadIdentity {
+		return fmt.Errorf("vault run cannot delegate a workload SVID to a child process; deploy the Agent Vault relay sidecar for proxy access")
 	}
 	fromEnv := tokenSource != ""
 
@@ -580,7 +583,6 @@ func augmentEnvWithMITM(env []string, addr, token, vault, caPath string) ([]stri
 	if err := os.WriteFile(caPath, pem, 0o600); err != nil { //nolint:gosec
 		return env, 0, false, fmt.Errorf("write CA: %w", err)
 	}
-
 
 	env = stripEnvKeys(env, mitmInjectedKeys)
 	env = append(env, isolation.BuildProxyEnv(isolation.ProxyEnvParams{

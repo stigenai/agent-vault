@@ -54,6 +54,19 @@ func TestAuthorizeAgentsRequiresPermittedExactActiveAgent(t *testing.T) {
 	}
 }
 
+func TestAuthorizeTrustDomains(t *testing.T) {
+	now := time.Now().UTC()
+	allowed := testSVID(t, "spiffe://cluster.example/server", now.Add(-time.Minute), now.Add(time.Hour))
+	other := testSVID(t, "spiffe://other.example/server", now.Add(-time.Minute), now.Add(time.Hour))
+	authorize := AuthorizeTrustDomains(spiffeid.RequireTrustDomainFromString("cluster.example"))
+	if err := authorize(allowed.ID, [][]*x509.Certificate{{allowed.Certificates[0]}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorize(other.ID, [][]*x509.Certificate{{other.Certificates[0]}}); err == nil {
+		t.Fatal("unconfigured server trust domain was authorized")
+	}
+}
+
 func TestAgentFromTLSRequiresVerifiedPeerAndRechecksRevocation(t *testing.T) {
 	now := time.Now().UTC()
 	svid := testSVID(t, "spiffe://cluster.example/workload", now.Add(-time.Minute), now.Add(time.Hour))

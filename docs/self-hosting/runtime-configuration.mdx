@@ -117,6 +117,8 @@ Legacy `AGENT_VAULT_RATELIMIT_<TIER>_<KNOB>` variables remain supported for per-
 
 In SPIFFE mode, `auth.workload_api` must be an absolute `unix:///` socket, every `auth.trust_domains` entry must be a trust-domain URI such as `spiffe://cluster.example`, and every `auth.bootstrap_owner_ids` entry must be an exact ID in one of those domains. The owner list is claimed transactionally once. Later TOML changes cannot add bootstrap owners; if all bootstrapped owners are removed, startup fails closed instead of replaying bootstrap.
 
+For in-cluster operator commands, configure `client.address`, `client.workload_api`, and `client.trust_domains` in the same TOML file (or use `AGENT_VAULT_ADDR`, `SPIFFE_ENDPOINT_SOCKET`, and `AGENT_VAULT_SPIFFE_TRUST_DOMAINS`). The CLI loads only the `[client]` section and does not resolve server-side database or encryption references. When workload identity is configured, every control-plane request uses the live rotating SVID, sends no bearer token, writes no `~/.agent-vault/session.json`, and never falls back to password re-authentication. `agent-vault run` cannot delegate an SVID to a child process; use the relay sidecar for workload proxy traffic.
+
 ## Kubernetes fleet example
 
 The repository includes a validated [server TOML](https://github.com/stigenai/agent-vault/blob/main/examples/kubernetes/fleet/server.toml), [Deployment](https://github.com/stigenai/agent-vault/blob/main/examples/kubernetes/fleet/deployment.yaml), and Kustomize file that generates the ConfigMap directly from that TOML. The example mounts a separate Secret volume, connects every replica to central PostgreSQL, and runs in the foreground as Kubernetes expects.
