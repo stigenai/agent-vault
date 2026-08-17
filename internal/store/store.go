@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,50 @@ import (
 
 // ErrNotFirstUser is returned by RegisterFirstUser when users already exist.
 var ErrNotFirstUser = errors.New("users already exist; not first user")
+
+const (
+	ManagedResourceVault      = "vault"
+	ManagedResourceAgent      = "agent"
+	ManagedResourceGrant      = "grant"
+	ManagedResourceService    = "service"
+	ManagedResourceCredential = "credential"
+)
+
+// ManagedResourceKey uses stable database IDs where available. ScopeID is
+// empty for instance resources, the vault ID for scoped resources, and
+// ResourceID is a vault/agent ID or a scoped service/credential identity.
+type ManagedResourceKey struct {
+	Kind       string
+	ScopeID    string
+	ResourceID string
+}
+
+// ManagedResource records declarative ownership and its optimistic revision.
+// Rows exist only for resources adopted by a manager; absence means unmanaged
+// at revision zero.
+type ManagedResource struct {
+	ManagedResourceKey
+	Manager   string
+	Revision  int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ManagedResourceConflict is safe to return through reconciliation APIs. It
+// contains resource identities and ownership metadata, never resource specs or
+// credential values.
+type ManagedResourceConflict struct {
+	Key              ManagedResourceKey
+	ExpectedManager  string
+	ExpectedRevision int64
+	ActualManager    string
+	ActualRevision   int64
+}
+
+func (e *ManagedResourceConflict) Error() string {
+	return fmt.Sprintf("managed %s %q revision conflict: expected manager %q revision %d, found manager %q revision %d",
+		e.Key.Kind, e.Key.ResourceID, e.ExpectedManager, e.ExpectedRevision, e.ActualManager, e.ActualRevision)
+}
 
 // DefaultVault is the name of the automatically-seeded vault.
 const DefaultVault = "default"
@@ -581,6 +626,12 @@ type CAState struct {
 // Store is the persistence interface for Agent Vault.
 // All methods are safe for concurrent use.
 type Store interface {
+	// Declarative ownership. An absent row means unmanaged revision zero.
+	GetManagedResource(ctx context.Context, key ManagedResourceKey) (*ManagedResource, error)
+	ListManagedResources(ctx context.Context) ([]ManagedResource, error)
+	CompareAndSwapManagedResource(ctx context.Context, key ManagedResourceKey, manager string, expectedRevision int64) (*ManagedResource, error)
+	ReleaseManagedResource(ctx context.Context, key ManagedResourceKey, manager string, expectedRevision int64) error
+
 	// Vaults
 	CreateVault(ctx context.Context, name string) (*Vault, error)
 	GetVault(ctx context.Context, name string) (*Vault, error)
@@ -594,6 +645,7 @@ type Store interface {
 	GetCredential(ctx context.Context, vaultID, key string) (*Credential, error)
 	ListCredentials(ctx context.Context, vaultID string) ([]Credential, error)
 	DeleteCredential(ctx context.Context, vaultID, key string) error
+	ListCredentialSources(ctx context.Context, vaultID string) ([]CredentialSource, error)
 
 	// OAuth credentials
 	GetCredentialOAuth(ctx context.Context, vaultID, key string) (*CredentialOAuth, error)

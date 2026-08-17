@@ -307,6 +307,12 @@ func (s *Server) BaseURL() string { return s.baseURL }
 
 // Store is the persistence interface used by the server.
 type Store interface {
+	GetManagedResource(ctx context.Context, key store.ManagedResourceKey) (*store.ManagedResource, error)
+	ListManagedResources(ctx context.Context) ([]store.ManagedResource, error)
+	CompareAndSwapManagedResource(ctx context.Context, key store.ManagedResourceKey, manager string, expectedRevision int64) (*store.ManagedResource, error)
+	ReleaseManagedResource(ctx context.Context, key store.ManagedResourceKey, manager string, expectedRevision int64) error
+	ListCredentialSources(ctx context.Context, vaultID string) ([]store.CredentialSource, error)
+
 	GetMasterKeyRecord(ctx context.Context) (*store.MasterKeyRecord, error)
 	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
@@ -920,6 +926,7 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("POST /v1/proposals", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleProposalCreate)))))
 	mux.HandleFunc("GET /v1/proposals/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleProposalGet))))
 	mux.HandleFunc("GET /v1/proposals", s.requireInitialized(s.requireAuth(actorAuthed(s.handleProposalList))))
+	mux.HandleFunc("GET /v1/fleet/state", s.requireInitialized(s.requireAuth(actorAuthed(s.handleFleetState))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/approve", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalApprove)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/reject", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalReject)))))
 

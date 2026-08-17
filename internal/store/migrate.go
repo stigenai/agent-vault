@@ -32,6 +32,7 @@ func CountSourceTables(src *SQLStore) ([]TableCount, error) {
 		"vault_grants",
 		"credentials",
 		"credential_sources",
+		"managed_resources",
 		"credential_oauth",
 		"credential_oauth_states",
 		"broker_configs",
@@ -77,6 +78,7 @@ func CountDestinationData(dst *SQLStore) (string, error) {
 		{"master_key", "SELECT COUNT(*) FROM master_key", nil},
 		{"sessions", "SELECT COUNT(*) FROM sessions", nil},
 		{"credentials", "SELECT COUNT(*) FROM credentials", nil},
+		{"managed_resources", "SELECT COUNT(*) FROM managed_resources", nil},
 	}
 	for _, c := range checks {
 		var n int
@@ -130,6 +132,7 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 		{"vault_grants", copyVaultGrants},
 		{"credentials", copyCredentials},
 		{"credential_sources", copyCredentialSources},
+		{"managed_resources", copyManagedResources},
 		{"credential_oauth", copyCredentialOAuth},
 		{"credential_oauth_states", copyCredentialOAuthStates},
 		{"broker_configs", copyBrokerConfigs},
@@ -544,6 +547,40 @@ func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDi
 			source.ProviderVersion, source.Health, source.LastErrorCode,
 			converted[0], converted[1], converted[2], converted[3], source.RefreshFailures,
 			claimOwner, converted[4], converted[5], converted[6]); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyManagedResources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT resource_kind, scope_id, resource_id, manager,
+		revision, created_at, updated_at FROM managed_resources`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var kind, scopeID, resourceID, manager string
+		var revision int64
+		var createdAt, updatedAt interface{}
+		if err := rows.Scan(&kind, &scopeID, &resourceID, &manager, &revision, &createdAt, &updatedAt); err != nil {
+			return n, err
+		}
+		ca, err := convertTime(createdAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, fmt.Errorf("converting created_at: %w", err)
+		}
+		ua, err := convertTime(updatedAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, fmt.Errorf("converting updated_at: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO managed_resources
+			(resource_kind, scope_id, resource_id, manager, revision, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`),
+			kind, scopeID, resourceID, manager, revision, ca, ua); err != nil {
 			return n, err
 		}
 		n++

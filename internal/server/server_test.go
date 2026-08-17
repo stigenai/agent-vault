@@ -30,6 +30,8 @@ var tp = timePtr
 
 // mockStore implements Store for testing.
 type mockStore struct {
+	credentialSources  map[string]*store.CredentialSource
+	managedResources   map[store.ManagedResourceKey]store.ManagedResource
 	masterKeyRecord    *store.MasterKeyRecord
 	sessions           map[string]*store.Session
 	vaults             map[string]*store.Vault
@@ -52,20 +54,75 @@ type mockStore struct {
 
 func newMockStore() *mockStore {
 	ms := &mockStore{
-		sessions:      make(map[string]*store.Session),
-		vaults:        make(map[string]*store.Vault),
-		credentials:   make(map[string]*store.Credential),
-		brokerConfigs: make(map[string]*store.BrokerConfig),
-		users:         make(map[string]*store.User),
-		userInvites:   make(map[string]*store.UserInvite),
-		agents:        make(map[string]*store.Agent),
-		settings:      make(map[string]string),
-		vaultSettings: make(map[string]map[string]string),
-		credStores:    make(map[string]*store.VaultCredentialStore),
+		credentialSources: make(map[string]*store.CredentialSource),
+		managedResources:  make(map[store.ManagedResourceKey]store.ManagedResource),
+		sessions:          make(map[string]*store.Session),
+		vaults:            make(map[string]*store.Vault),
+		credentials:       make(map[string]*store.Credential),
+		brokerConfigs:     make(map[string]*store.BrokerConfig),
+		users:             make(map[string]*store.User),
+		userInvites:       make(map[string]*store.UserInvite),
+		agents:            make(map[string]*store.Agent),
+		settings:          make(map[string]string),
+		vaultSettings:     make(map[string]map[string]string),
+		credStores:        make(map[string]*store.VaultCredentialStore),
 	}
 	// Seed root vault
 	ms.vaults["default"] = &store.Vault{ID: "root-ns-id", Name: "default"}
 	return ms
+}
+
+func (m *mockStore) GetManagedResource(_ context.Context, key store.ManagedResourceKey) (*store.ManagedResource, error) {
+	resource, ok := m.managedResources[key]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return &resource, nil
+}
+
+func (m *mockStore) ListManagedResources(context.Context) ([]store.ManagedResource, error) {
+	resources := make([]store.ManagedResource, 0, len(m.managedResources))
+	for _, resource := range m.managedResources {
+		resources = append(resources, resource)
+	}
+	return resources, nil
+}
+
+func (m *mockStore) CompareAndSwapManagedResource(_ context.Context, key store.ManagedResourceKey, manager string, expected int64) (*store.ManagedResource, error) {
+	resource, exists := m.managedResources[key]
+	actualRevision, actualManager := int64(0), ""
+	if exists {
+		actualRevision, actualManager = resource.Revision, resource.Manager
+	}
+	if (expected == 0 && exists) || (expected != 0 && (!exists || resource.Revision != expected || resource.Manager != manager)) {
+		return nil, &store.ManagedResourceConflict{Key: key, ExpectedManager: manager, ExpectedRevision: expected, ActualManager: actualManager, ActualRevision: actualRevision}
+	}
+	if expected == 0 {
+		resource = store.ManagedResource{ManagedResourceKey: key, Manager: manager, Revision: 1}
+	} else {
+		resource.Revision++
+	}
+	m.managedResources[key] = resource
+	return &resource, nil
+}
+
+func (m *mockStore) ReleaseManagedResource(_ context.Context, key store.ManagedResourceKey, manager string, expected int64) error {
+	resource, exists := m.managedResources[key]
+	if !exists || resource.Manager != manager || resource.Revision != expected {
+		return &store.ManagedResourceConflict{Key: key, ExpectedManager: manager, ExpectedRevision: expected}
+	}
+	delete(m.managedResources, key)
+	return nil
+}
+
+func (m *mockStore) ListCredentialSources(_ context.Context, vaultID string) ([]store.CredentialSource, error) {
+	var sources []store.CredentialSource
+	for _, source := range m.credentialSources {
+		if source.VaultID == vaultID {
+			sources = append(sources, *source)
+		}
+	}
+	return sources, nil
 }
 
 func (m *mockStore) GetMasterKeyRecord(_ context.Context) (*store.MasterKeyRecord, error) {
