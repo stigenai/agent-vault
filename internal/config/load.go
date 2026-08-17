@@ -21,6 +21,7 @@ type Options struct {
 	Path        string
 	DefaultPath string
 	LookupEnv   LookupEnv
+	Resolver    Resolver
 	Flags       Partial
 }
 
@@ -31,6 +32,10 @@ func Load(opts Options) (Result, error) {
 	lookup := opts.LookupEnv
 	if lookup == nil {
 		lookup = os.LookupEnv
+	}
+	resolver := opts.Resolver
+	if resolver.LookupEnv == nil {
+		resolver.LookupEnv = lookup
 	}
 	result := Result{Config: Defaults(), Sources: defaultSources()}
 
@@ -47,7 +52,9 @@ func Load(opts Options) (Result, error) {
 			if partial.SchemaVersion == nil {
 				return Result{}, fmt.Errorf("config %q: schema_version is required", path)
 			}
-			applyPartial(&result, partial, SourceTOML)
+			if err := applyPartial(&result, partial, SourceTOML, resolver); err != nil {
+				return Result{}, fmt.Errorf("config %q: %w", path, err)
+			}
 			result.Path = path
 		}
 	}
@@ -55,7 +62,9 @@ func Load(opts Options) (Result, error) {
 	if err := applyEnvironment(&result, lookup); err != nil {
 		return Result{}, err
 	}
-	applyPartial(&result, opts.Flags, SourceFlag)
+	if err := applyPartial(&result, opts.Flags, SourceFlag, resolver); err != nil {
+		return Result{}, fmt.Errorf("flag configuration: %w", err)
+	}
 	if err := result.Config.Validate(); err != nil {
 		return Result{}, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -90,6 +99,9 @@ func decode(r io.Reader) (Partial, error) {
 	dec := toml.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&partial); err != nil {
+		if errors.Is(err, ErrSecretReferenceRequired) {
+			return Partial{}, ErrSecretReferenceRequired
+		}
 		return Partial{}, err
 	}
 	return partial, nil
@@ -176,7 +188,11 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 		return err
 	}
 
-	setString("DATABASE_URL", "database.url", &result.Config.Database.URL)
+	if value, ok := lookup("DATABASE_URL"); ok {
+		ref, _ := ParseSecretRef("env://DATABASE_URL")
+		result.Config.Database.URL = newSecretValue(ref, []byte(value))
+		result.Sources["database.url"] = SourceEnvironment
+	}
 	setString("AGENT_VAULT_SQLITE_PATH", "database.sqlite_path", &result.Config.Database.SQLitePath)
 	if err := setInt("DB_MAX_OPEN_CONNS", "database.max_open_conns", &result.Config.Database.MaxOpenConns); err != nil {
 		return err
@@ -204,6 +220,16 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 	setString("AGENT_VAULT_VAULT", "client.vault", &result.Config.Client.Vault)
 	setString("SPIFFE_ENDPOINT_SOCKET", "client.workload_api", &result.Config.Client.WorkloadAPI)
 	setList("AGENT_VAULT_SPIFFE_TRUST_DOMAINS", "client.trust_domains", &result.Config.Client.TrustDomains)
+	if value, ok := lookup("AGENT_VAULT_MASTER_PASSWORD"); ok {
+		ref, _ := ParseSecretRef("env://AGENT_VAULT_MASTER_PASSWORD")
+		result.Config.Encryption.LegacyMasterPassword = newSecretValue(ref, []byte(value))
+		result.Sources["encryption.legacy_master_password"] = SourceEnvironment
+	}
+	if value, ok := lookup("AGENT_VAULT_SMTP_PASSWORD"); ok {
+		ref, _ := ParseSecretRef("env://AGENT_VAULT_SMTP_PASSWORD")
+		result.Config.SMTP.Password = newSecretValue(ref, []byte(value))
+		result.Sources["smtp.password"] = SourceEnvironment
+	}
 
 	if value, ok := lookup("AGENT_VAULT_LOGS_MAX_AGE_HOURS"); ok {
 		hours, err := strconv.ParseFloat(value, 64)
@@ -246,7 +272,7 @@ func splitList(value string) []string {
 	return result
 }
 
-func applyPartial(result *Result, partial Partial, source Source) {
+func applyPartial(result *Result, partial Partial, source Source, resolver Resolver) error {
 	set := func(field string) { result.Sources[field] = source }
 	if partial.SchemaVersion != nil {
 		result.Config.SchemaVersion = *partial.SchemaVersion
@@ -277,7 +303,11 @@ func applyPartial(result *Result, partial Partial, source Source) {
 		set("server.detach")
 	}
 	if v := partial.Database.URL; v != nil {
-		result.Config.Database.URL = *v
+		value, err := resolver.Resolve(*v)
+		if err != nil {
+			return fmt.Errorf("database.url: %w", err)
+		}
+		result.Config.Database.URL = value
 		set("database.url")
 	}
 	if v := partial.Database.SQLitePath; v != nil {
@@ -332,6 +362,22 @@ func applyPartial(result *Result, partial Partial, source Source) {
 		result.Config.Client.TrustDomains = append([]string(nil), (*v)...)
 		set("client.trust_domains")
 	}
+	if v := partial.Encryption.LegacyMasterPassword; v != nil {
+		value, err := resolver.Resolve(*v)
+		if err != nil {
+			return fmt.Errorf("encryption.legacy_master_password: %w", err)
+		}
+		result.Config.Encryption.LegacyMasterPassword = value
+		set("encryption.legacy_master_password")
+	}
+	if v := partial.SMTP.Password; v != nil {
+		value, err := resolver.Resolve(*v)
+		if err != nil {
+			return fmt.Errorf("smtp.password: %w", err)
+		}
+		result.Config.SMTP.Password = value
+		set("smtp.password")
+	}
 	if v := partial.Logs.MaxAge; v != nil {
 		result.Config.Logs.MaxAge = time.Duration(*v)
 		set("logs.max_age")
@@ -356,4 +402,5 @@ func applyPartial(result *Result, partial Partial, source Source) {
 		result.Config.Telemetry.Enabled = *v
 		set("telemetry.enabled")
 	}
+	return nil
 }

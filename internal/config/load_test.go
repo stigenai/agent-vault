@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,7 +21,7 @@ log_level = "debug"
 detach = true
 
 [database]
-url = "postgres://toml/db"
+url = "env://TOML_DATABASE_URL"
 sqlite_path = ""
 max_open_conns = 40
 max_idle_conns = 20
@@ -38,6 +39,12 @@ address = "https://client.toml.example"
 vault = "toml-vault"
 workload_api = "unix:///toml/spire.sock"
 trust_domains = ["spiffe://toml.example"]
+
+[encryption]
+legacy_master_password = "env://TOML_MASTER_PASSWORD"
+
+[smtp]
+password = "file:///toml/smtp-password"
 
 [logs]
 max_age = "48h"
@@ -70,7 +77,18 @@ func TestDefaults(t *testing.T) {
 
 func TestLoadFullTOMLAndSources(t *testing.T) {
 	path := writeConfig(t, "full.toml", fullTOML)
-	got, err := Load(Options{Path: path, LookupEnv: emptyEnv})
+	got, err := Load(Options{
+		Path: path,
+		LookupEnv: mapEnv(map[string]string{
+			"TOML_DATABASE_URL": "postgres://toml/db", "TOML_MASTER_PASSWORD": "toml-master-password",
+		}),
+		Resolver: Resolver{ReadFile: func(path string, _ int64) ([]byte, error) {
+			if path != "/toml/smtp-password" {
+				t.Fatalf("unexpected secret path %q", path)
+			}
+			return []byte("toml-smtp-password"), nil
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +99,7 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 			ExternalAddress: "https://vault.toml.example", LogLevel: "debug", Detach: true,
 		},
 		Database: Database{
-			URL: "postgres://toml/db", MaxOpenConns: 40, MaxIdleConns: 20, ConnMaxLifetime: 10 * time.Minute,
+			URL: secretValue("env://TOML_DATABASE_URL", "postgres://toml/db"), MaxOpenConns: 40, MaxIdleConns: 20, ConnMaxLifetime: 10 * time.Minute,
 		},
 		Proxy: Proxy{
 			MaxRequestBytes: 2000, MaxResponseBytes: 1000, AllowPrivateRanges: true,
@@ -91,9 +109,11 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 			Address: "https://client.toml.example", Vault: "toml-vault",
 			WorkloadAPI: "unix:///toml/spire.sock", TrustDomains: []string{"spiffe://toml.example"},
 		},
-		Logs:      Logs{MaxAge: 48 * time.Hour, MaxRowsPerVault: 20000, RetentionLocked: true},
-		RateLimit: RateLimit{Profile: "strict", Locked: true},
-		Telemetry: Telemetry{Enabled: false},
+		Encryption: Encryption{LegacyMasterPassword: secretValue("env://TOML_MASTER_PASSWORD", "toml-master-password")},
+		SMTP:       SMTP{Password: secretValue("file:///toml/smtp-password", "toml-smtp-password")},
+		Logs:       Logs{MaxAge: 48 * time.Hour, MaxRowsPerVault: 20000, RetentionLocked: true},
+		RateLimit:  RateLimit{Profile: "strict", Locked: true},
+		Telemetry:  Telemetry{Enabled: false},
 	}
 	if !reflect.DeepEqual(got.Config, want) {
 		t.Fatalf("loaded config mismatch\n got: %#v\nwant: %#v", got.Config, want)
@@ -114,7 +134,10 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 func TestLoadPrecedenceEveryField(t *testing.T) {
 	path := writeConfig(t, "precedence.toml", fullTOML)
 	env := map[string]string{
-		"AGENT_VAULT_HOST": "env-host", "PORT": "34321", "AGENT_VAULT_MITM_PORT": "34322",
+		"TOML_DATABASE_URL": "postgres://toml/db", "FLAG_DATABASE_URL": "postgres://flag/db",
+		"TOML_MASTER_PASSWORD": "toml-master-password", "FLAG_MASTER_PASSWORD": "flag-master-password",
+		"FLAG_SMTP_PASSWORD": "flag-smtp-password",
+		"AGENT_VAULT_HOST":   "env-host", "PORT": "34321", "AGENT_VAULT_MITM_PORT": "34322",
 		"AGENT_VAULT_ADDR": "https://env.example", "AGENT_VAULT_LOG_LEVEL": "info", "AGENT_VAULT_DETACH": "false",
 		"DATABASE_URL": "postgres://env/db", "AGENT_VAULT_SQLITE_PATH": "",
 		"DB_MAX_OPEN_CONNS": "50", "DB_MAX_IDLE_CONNS": "30", "DB_CONN_MAX_LIFETIME": "20m",
@@ -123,16 +146,18 @@ func TestLoadPrecedenceEveryField(t *testing.T) {
 		"AGENT_VAULT_TRUSTED_PROXIES": "198.51.100.1",
 		"AGENT_VAULT_VAULT":           "env-vault", "SPIFFE_ENDPOINT_SOCKET": "unix:///env/spire.sock",
 		"AGENT_VAULT_SPIFFE_TRUST_DOMAINS": "spiffe://env.example",
-		"AGENT_VAULT_LOGS_MAX_AGE_HOURS":   "72", "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT": "30000",
+		"AGENT_VAULT_MASTER_PASSWORD":      "env-master-password", "AGENT_VAULT_SMTP_PASSWORD": "env-smtp-password",
+		"AGENT_VAULT_LOGS_MAX_AGE_HOURS": "72", "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT": "30000",
 		"AGENT_VAULT_LOGS_RETENTION_LOCK": "false", "AGENT_VAULT_RATELIMIT_PROFILE": "loose",
 		"AGENT_VAULT_RATELIMIT_LOCK": "false", "AGENT_VAULT_TELEMETRY": "true",
 	}
 
-	result, err := Load(Options{Path: path, LookupEnv: mapEnv(env)})
+	resolver := Resolver{ReadFile: func(string, int64) ([]byte, error) { return []byte("toml-smtp-password"), nil }}
+	result, err := Load(Options{Path: path, LookupEnv: mapEnv(env), Resolver: resolver})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Config.Server.Host != "env-host" || result.Config.Database.URL != "postgres://env/db" || result.Config.Client.Vault != "env-vault" {
+	if result.Config.Server.Host != "env-host" || result.Config.Database.URL.RevealString() != "postgres://env/db" || result.Config.Client.Vault != "env-vault" {
 		t.Fatalf("environment did not override TOML: %#v", result.Config)
 	}
 	for _, field := range fieldNames {
@@ -146,7 +171,7 @@ func TestLoadPrecedenceEveryField(t *testing.T) {
 	}
 
 	flags := allFlagOverrides()
-	result, err = Load(Options{Path: path, LookupEnv: mapEnv(env), Flags: flags})
+	result, err = Load(Options{Path: path, LookupEnv: mapEnv(env), Resolver: resolver, Flags: flags})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,9 +196,9 @@ func TestConfigDiscovery(t *testing.T) {
 		opts Options
 		want int
 	}{
-		{"explicit beats env", Options{Path: explicit, DefaultPath: defaultPath, LookupEnv: mapEnv(map[string]string{"AGENT_VAULT_CONFIG": envPath})}, 11111},
-		{"env beats default", Options{DefaultPath: defaultPath, LookupEnv: mapEnv(map[string]string{"AGENT_VAULT_CONFIG": envPath})}, 22222},
-		{"default", Options{DefaultPath: defaultPath, LookupEnv: emptyEnv}, 33333},
+		{"explicit beats env", Options{Path: explicit, DefaultPath: defaultPath, LookupEnv: discoveryEnv(envPath), Resolver: discoveryResolver()}, 11111},
+		{"env beats default", Options{DefaultPath: defaultPath, LookupEnv: discoveryEnv(envPath), Resolver: discoveryResolver()}, 22222},
+		{"default", Options{DefaultPath: defaultPath, LookupEnv: discoveryEnv(""), Resolver: discoveryResolver()}, 33333},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,7 +260,7 @@ func TestValidationErrors(t *testing.T) {
 		{"bad proxy port", "[server]\nproxy_port=70000", "server.proxy_port"},
 		{"bad log level", "[server]\nlog_level=\"trace\"", "server.log_level"},
 		{"bad external URL", "[server]\nexternal_address=\"ftp://bad\"", "server.external_address"},
-		{"two databases", "[database]\nurl=\"postgres://db/x\"\nsqlite_path=\"/tmp/x\"", "mutually exclusive"},
+		{"two databases", "[database]\nurl=\"env://TEST_DATABASE_URL\"\nsqlite_path=\"/tmp/x\"", "mutually exclusive"},
 		{"negative open", "[database]\nmax_open_conns=-1", "database.max_open_conns"},
 		{"idle exceeds open", "[database]\nmax_open_conns=1\nmax_idle_conns=2", "database.max_idle_conns"},
 		{"zero lifetime", "[database]\nconn_max_lifetime=\"0s\"", "database.conn_max_lifetime"},
@@ -252,7 +277,11 @@ func TestValidationErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfig(t, "invalid.toml", "schema_version=1\n"+tc.body+"\n")
-			_, err := Load(Options{Path: path, LookupEnv: emptyEnv})
+			lookup := emptyEnv
+			if tc.name == "two databases" {
+				lookup = mapEnv(map[string]string{"TEST_DATABASE_URL": "postgres://db/x"})
+			}
+			_, err := Load(Options{Path: path, LookupEnv: lookup})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
@@ -282,7 +311,9 @@ func TestInvalidEnvironmentErrorsAreDeterministic(t *testing.T) {
 func allFlagOverrides() Partial {
 	version, host, port, proxyPort := 1, "flag-host", 44321, 44322
 	external, level, detach := "https://flag.example", "debug", true
-	dbURL, sqlitePath, open, idle := "postgres://flag/db", "", 60, 40
+	dbURL, sqlitePath, open, idle := mustSecretRef("env://FLAG_DATABASE_URL"), "", 60, 40
+	masterPassword := mustSecretRef("env://FLAG_MASTER_PASSWORD")
+	smtpPassword := mustSecretRef("env://FLAG_SMTP_PASSWORD")
 	lifetime := Duration(30 * time.Minute)
 	requestBytes, responseBytes, private := int64(4000), int64(2500), true
 	allowlist, proxies := []string{"10.10.0.0/16"}, []string{"203.0.113.1"}
@@ -296,6 +327,8 @@ func allFlagOverrides() Partial {
 		Database:      PartialDatabase{URL: &dbURL, SQLitePath: &sqlitePath, MaxOpenConns: &open, MaxIdleConns: &idle, ConnMaxLifetime: &lifetime},
 		Proxy:         PartialProxy{MaxRequestBytes: &requestBytes, MaxResponseBytes: &responseBytes, AllowPrivateRanges: &private, NetworkAllowlist: &allowlist, TrustedProxies: &proxies},
 		Client:        PartialClient{Address: &address, Vault: &vault, WorkloadAPI: &socket, TrustDomains: &trustDomains},
+		Encryption:    PartialEncryption{LegacyMasterPassword: &masterPassword},
+		SMTP:          PartialSMTP{Password: &smtpPassword},
 		Logs:          PartialLogs{MaxAge: &maxAge, MaxRowsPerVault: &rows, RetentionLocked: &retention},
 		RateLimit:     PartialRateLimit{Profile: &profile, Locked: &locked},
 		Telemetry:     PartialTelemetry{Enabled: &telemetry},
@@ -306,13 +339,35 @@ func flagRuntime() Runtime {
 	return Runtime{
 		SchemaVersion: 1,
 		Server:        Server{Host: "flag-host", Port: 44321, ProxyPort: 44322, ExternalAddress: "https://flag.example", LogLevel: "debug", Detach: true},
-		Database:      Database{URL: "postgres://flag/db", MaxOpenConns: 60, MaxIdleConns: 40, ConnMaxLifetime: 30 * time.Minute},
+		Database:      Database{URL: secretValue("env://FLAG_DATABASE_URL", "postgres://flag/db"), MaxOpenConns: 60, MaxIdleConns: 40, ConnMaxLifetime: 30 * time.Minute},
 		Proxy:         Proxy{MaxRequestBytes: 4000, MaxResponseBytes: 2500, AllowPrivateRanges: true, NetworkAllowlist: []string{"10.10.0.0/16"}, TrustedProxies: []string{"203.0.113.1"}},
 		Client:        Client{Address: "https://flag-client.example", Vault: "flag-vault", WorkloadAPI: "unix:///flag/spire.sock", TrustDomains: []string{"spiffe://flag.example"}},
+		Encryption:    Encryption{LegacyMasterPassword: secretValue("env://FLAG_MASTER_PASSWORD", "flag-master-password")},
+		SMTP:          SMTP{Password: secretValue("env://FLAG_SMTP_PASSWORD", "flag-smtp-password")},
 		Logs:          Logs{MaxAge: 96 * time.Hour, MaxRowsPerVault: 40000, RetentionLocked: true},
 		RateLimit:     RateLimit{Profile: "off", Locked: true},
 		Telemetry:     Telemetry{Enabled: false},
 	}
+}
+
+func discoveryEnv(configPath string) LookupEnv {
+	values := map[string]string{
+		"TOML_DATABASE_URL":    "postgres://toml/db",
+		"TOML_MASTER_PASSWORD": "toml-master-password",
+	}
+	if configPath != "" {
+		values["AGENT_VAULT_CONFIG"] = configPath
+	}
+	return mapEnv(values)
+}
+
+func discoveryResolver() Resolver {
+	return Resolver{ReadFile: func(path string, _ int64) ([]byte, error) {
+		if path != "/toml/smtp-password" {
+			return nil, fmt.Errorf("unexpected secret path %q", path)
+		}
+		return []byte("toml-smtp-password"), nil
+	}}
 }
 
 func writeConfig(t *testing.T, name, body string) string {
@@ -331,4 +386,16 @@ func mapEnv(values map[string]string) LookupEnv {
 		value, ok := values[key]
 		return value, ok
 	}
+}
+
+func mustSecretRef(raw string) SecretRef {
+	ref, err := ParseSecretRef(raw)
+	if err != nil {
+		panic(err)
+	}
+	return ref
+}
+
+func secretValue(ref, value string) SecretValue {
+	return newSecretValue(mustSecretRef(ref), []byte(value))
 }

@@ -46,6 +46,8 @@ type Runtime struct {
 	Database      Database
 	Proxy         Proxy
 	Client        Client
+	Encryption    Encryption
+	SMTP          SMTP
 	Logs          Logs
 	RateLimit     RateLimit
 	Telemetry     Telemetry
@@ -61,7 +63,7 @@ type Server struct {
 }
 
 type Database struct {
-	URL             string
+	URL             SecretValue
 	SQLitePath      string
 	MaxOpenConns    int
 	MaxIdleConns    int
@@ -83,6 +85,16 @@ type Client struct {
 	TrustDomains []string
 }
 
+// Encryption contains compatibility key material until provider-backed DEK
+// wrapping replaces the legacy master password.
+type Encryption struct {
+	LegacyMasterPassword SecretValue
+}
+
+type SMTP struct {
+	Password SecretValue
+}
+
 type Logs struct {
 	MaxAge          time.Duration
 	MaxRowsPerVault int64
@@ -101,14 +113,16 @@ type Telemetry struct {
 // Partial represents values supplied by one configuration layer. Pointers
 // distinguish an explicit zero value from an omitted value.
 type Partial struct {
-	SchemaVersion *int             `toml:"schema_version"`
-	Server        PartialServer    `toml:"server"`
-	Database      PartialDatabase  `toml:"database"`
-	Proxy         PartialProxy     `toml:"proxy"`
-	Client        PartialClient    `toml:"client"`
-	Logs          PartialLogs      `toml:"logs"`
-	RateLimit     PartialRateLimit `toml:"rate_limit"`
-	Telemetry     PartialTelemetry `toml:"telemetry"`
+	SchemaVersion *int              `toml:"schema_version"`
+	Server        PartialServer     `toml:"server"`
+	Database      PartialDatabase   `toml:"database"`
+	Proxy         PartialProxy      `toml:"proxy"`
+	Client        PartialClient     `toml:"client"`
+	Encryption    PartialEncryption `toml:"encryption"`
+	SMTP          PartialSMTP       `toml:"smtp"`
+	Logs          PartialLogs       `toml:"logs"`
+	RateLimit     PartialRateLimit  `toml:"rate_limit"`
+	Telemetry     PartialTelemetry  `toml:"telemetry"`
 }
 
 type PartialServer struct {
@@ -121,11 +135,11 @@ type PartialServer struct {
 }
 
 type PartialDatabase struct {
-	URL             *string   `toml:"url"`
-	SQLitePath      *string   `toml:"sqlite_path"`
-	MaxOpenConns    *int      `toml:"max_open_conns"`
-	MaxIdleConns    *int      `toml:"max_idle_conns"`
-	ConnMaxLifetime *Duration `toml:"conn_max_lifetime"`
+	URL             *SecretRef `toml:"url"`
+	SQLitePath      *string    `toml:"sqlite_path"`
+	MaxOpenConns    *int       `toml:"max_open_conns"`
+	MaxIdleConns    *int       `toml:"max_idle_conns"`
+	ConnMaxLifetime *Duration  `toml:"conn_max_lifetime"`
 }
 
 type PartialProxy struct {
@@ -141,6 +155,14 @@ type PartialClient struct {
 	Vault        *string   `toml:"vault"`
 	WorkloadAPI  *string   `toml:"workload_api"`
 	TrustDomains *[]string `toml:"trust_domains"`
+}
+
+type PartialEncryption struct {
+	LegacyMasterPassword *SecretRef `toml:"legacy_master_password"`
+}
+
+type PartialSMTP struct {
+	Password *SecretRef `toml:"password"`
 }
 
 type PartialLogs struct {
@@ -202,6 +224,7 @@ var fieldNames = []string{
 	"database.url", "database.sqlite_path", "database.max_open_conns", "database.max_idle_conns", "database.conn_max_lifetime",
 	"proxy.max_request_bytes", "proxy.max_response_bytes", "proxy.allow_private_ranges", "proxy.network_allowlist", "proxy.trusted_proxies",
 	"client.address", "client.vault", "client.workload_api", "client.trust_domains",
+	"encryption.legacy_master_password", "smtp.password",
 	"logs.max_age", "logs.max_rows_per_vault", "logs.retention_locked",
 	"rate_limit.profile", "rate_limit.locked",
 	"telemetry.enabled",
@@ -236,7 +259,7 @@ func (c Runtime) Validate() error {
 	if err := validHTTPURL("server.external_address", c.Server.ExternalAddress, true); err != nil {
 		return err
 	}
-	if c.Database.URL != "" && c.Database.SQLitePath != "" {
+	if c.Database.URL.IsSet() && c.Database.SQLitePath != "" {
 		return fmt.Errorf("database: url and sqlite_path are mutually exclusive")
 	}
 	if c.Database.MaxOpenConns < 0 {
