@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -331,6 +332,9 @@ type CredentialSource struct {
 	LastRefreshAt          *time.Time
 	LastSuccessAt          *time.Time
 	NextRefreshAt          *time.Time
+	RefreshFailures        int
+	ClaimOwner             string
+	ClaimUntil             *time.Time
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 }
@@ -340,6 +344,48 @@ type CredentialSourceStore interface {
 	GetCredentialSource(context.Context, string, string) (*CredentialSource, error)
 	ListCredentialSources(context.Context, string) ([]CredentialSource, error)
 	DeleteCredentialSource(context.Context, string, string) error
+}
+
+type CredentialRefreshStore interface {
+	CredentialSourceStore
+	ClaimCredentialSources(context.Context, string, time.Time, time.Duration, int) ([]CredentialSource, error)
+	CompleteCredentialRefresh(context.Context, CredentialRefreshCompletion) (bool, error)
+	FailCredentialRefresh(context.Context, CredentialRefreshFailure) (bool, error)
+}
+
+type CredentialRefreshCompletion struct {
+	VaultID         string
+	CredentialKey   string
+	ClaimOwner      string
+	ProviderVersion string
+	Ciphertext      []byte
+	Nonce           []byte
+	ValueChanged    bool
+	RefreshedAt     time.Time
+	NextRefreshAt   time.Time
+}
+
+type CredentialRefreshFailure struct {
+	VaultID       string
+	CredentialKey string
+	ClaimOwner    string
+	ErrorCode     string
+	Health        string
+	AttemptedAt   time.Time
+	NextRefreshAt time.Time
+}
+
+var ErrCredentialStale = errors.New("credential reference cache is stale or unavailable")
+
+func CredentialSourceUsable(source *CredentialSource, now time.Time) bool {
+	if source == nil || source.LastSuccessAt == nil || source.CacheUpdatedAt == nil {
+		return false
+	}
+	if source.MaxStalenessSeconds == 0 {
+		return source.Kind == CredentialSourceInfisical && strings.HasPrefix(source.ProviderName, "legacy-infisical-")
+	}
+	return now.Before(source.LastSuccessAt.Add(time.Duration(source.MaxStalenessSeconds)*time.Second)) ||
+		now.Equal(source.LastSuccessAt.Add(time.Duration(source.MaxStalenessSeconds)*time.Second))
 }
 
 // Wire-protocol values for VaultCredentialStore.Kind. KindBuiltin is the

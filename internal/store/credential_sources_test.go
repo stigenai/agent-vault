@@ -178,7 +178,8 @@ func TestCredentialSourceMigrationBackfillsExistingExternalVault(t *testing.T) {
 	if _, err := s.db.Exec(`DROP TABLE credential_sources`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`DELETE FROM schema_migrations WHERE name = '20260817200000_add_credential_sources'`); err != nil {
+	if _, err := s.db.Exec(`DELETE FROM schema_migrations WHERE name IN (
+		'20260817200000_add_credential_sources', '20260817201000_add_credential_refresh_claims')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

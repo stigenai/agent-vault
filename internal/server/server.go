@@ -240,6 +240,30 @@ type credentialStoreAdapter struct {
 	Store
 }
 
+func (a credentialStoreAdapter) GetCredential(ctx context.Context, vaultID, key string) (*store.Credential, error) {
+	credential, err := a.Store.GetCredential(ctx, vaultID, key)
+	if err != nil {
+		return nil, err
+	}
+	sources, ok := any(a.Store).(interface {
+		GetCredentialSource(context.Context, string, string) (*store.CredentialSource, error)
+	})
+	if !ok {
+		return credential, nil
+	}
+	source, err := sources.GetCredentialSource(ctx, vaultID, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return credential, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !store.CredentialSourceUsable(source, time.Now().UTC()) {
+		return nil, store.ErrCredentialStale
+	}
+	return credential, nil
+}
+
 func (a credentialStoreAdapter) UnmatchedHostPolicy(ctx context.Context, vaultID string) (brokercore.UnmatchedHostPolicy, error) {
 	return readUnmatchedHostPolicy(ctx, a.Store, vaultID)
 }

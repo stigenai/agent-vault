@@ -914,18 +914,172 @@ func (s *SQLStore) DeleteCredentialSource(ctx context.Context, vaultID, credenti
 	return nil
 }
 
+func (s *SQLStore) ClaimCredentialSources(ctx context.Context, workerID string, now time.Time, lease time.Duration, limit int) ([]CredentialSource, error) {
+	if workerID == "" || strings.ContainsAny(workerID, "\r\n\x00") || lease < 5*time.Second || lease > 10*time.Minute {
+		return nil, fmt.Errorf("credential refresh worker or lease is invalid")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning credential refresh claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now = now.UTC()
+	rows, err := tx.QueryContext(ctx, s.dialect.Rebind(`SELECT vault_id, credential_key
+		FROM credential_sources
+		WHERE (next_refresh_at IS NULL OR next_refresh_at <= ?)
+		  AND (claim_until IS NULL OR claim_until <= ?)
+		ORDER BY CASE WHEN next_refresh_at IS NULL THEN 0 ELSE 1 END, next_refresh_at, vault_id, credential_key
+		LIMIT ?`), s.dialect.FormatTime(now), s.dialect.FormatTime(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("selecting credential refresh claims: %w", err)
+	}
+	type key struct{ vaultID, credentialKey string }
+	var keys []key
+	for rows.Next() {
+		var candidate key
+		if err := rows.Scan(&candidate.vaultID, &candidate.credentialKey); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		keys = append(keys, candidate)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	claimUntil := now.Add(lease)
+	var claimed []CredentialSource
+	for _, candidate := range keys {
+		result, err := tx.ExecContext(ctx, s.dialect.Rebind(`UPDATE credential_sources
+			SET claim_owner = ?, claim_until = ?, updated_at = ?
+			WHERE vault_id = ? AND credential_key = ?
+			  AND (next_refresh_at IS NULL OR next_refresh_at <= ?)
+			  AND (claim_until IS NULL OR claim_until <= ?)`),
+			workerID, s.dialect.FormatTime(claimUntil), s.dialect.FormatTime(now),
+			candidate.vaultID, candidate.credentialKey, s.dialect.FormatTime(now), s.dialect.FormatTime(now))
+		if err != nil {
+			return nil, fmt.Errorf("claiming credential refresh: %w", err)
+		}
+		count, _ := result.RowsAffected()
+		if count == 0 {
+			continue
+		}
+		source, err := s.scanCredentialSource(tx.QueryRowContext(ctx,
+			s.dialect.Rebind(credentialSourceSelect+` WHERE vault_id = ? AND credential_key = ?`),
+			candidate.vaultID, candidate.credentialKey))
+		if err != nil {
+			return nil, err
+		}
+		claimed = append(claimed, *source)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing credential refresh claims: %w", err)
+	}
+	return claimed, nil
+}
+
+func (s *SQLStore) CompleteCredentialRefresh(ctx context.Context, completion CredentialRefreshCompletion) (bool, error) {
+	if completion.VaultID == "" || completion.CredentialKey == "" || completion.ClaimOwner == "" ||
+		completion.RefreshedAt.IsZero() || completion.NextRefreshAt.IsZero() ||
+		strings.ContainsAny(completion.ProviderVersion, "\r\n\x00") {
+		return false, fmt.Errorf("credential refresh completion is invalid")
+	}
+	if completion.ValueChanged && (len(completion.Ciphertext) == 0 || len(completion.Nonce) == 0) {
+		return false, fmt.Errorf("changed credential refresh requires encrypted cache")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("beginning credential refresh completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var owner sql.NullString
+	var cacheUpdatedAt any
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT claim_owner, cache_updated_at FROM credential_sources WHERE vault_id = ? AND credential_key = ?`)+s.dialect.ForUpdateClause(),
+		completion.VaultID, completion.CredentialKey).Scan(&owner, &cacheUpdatedAt); err != nil {
+		return false, err
+	}
+	if owner.String != completion.ClaimOwner {
+		return false, nil
+	}
+	if !completion.ValueChanged && cacheUpdatedAt == nil {
+		return false, fmt.Errorf("unchanged refresh requires an existing encrypted cache")
+	}
+	refreshedAt := s.dialect.FormatTime(completion.RefreshedAt.UTC())
+	if completion.ValueChanged {
+		result, err := tx.ExecContext(ctx, s.dialect.Rebind(`UPDATE credentials
+			SET ciphertext = ?, nonce = ?, updated_at = ? WHERE vault_id = ? AND key = ?`),
+			completion.Ciphertext, completion.Nonce, refreshedAt, completion.VaultID, completion.CredentialKey)
+		if err != nil {
+			return false, fmt.Errorf("updating encrypted credential cache: %w", err)
+		}
+		if count, _ := result.RowsAffected(); count == 0 {
+			return false, sql.ErrNoRows
+		}
+	}
+	cacheExpr := "cache_updated_at"
+	if completion.ValueChanged {
+		cacheExpr = "?"
+	}
+	query := `UPDATE credential_sources SET provider_version = ?, health = 'ok', last_error_code = '',
+		cache_updated_at = ` + cacheExpr + `, last_refresh_at = ?, last_success_at = ?,
+		next_refresh_at = ?, refresh_failures = 0, claim_owner = NULL, claim_until = NULL, updated_at = ?
+		WHERE vault_id = ? AND credential_key = ? AND claim_owner = ?`
+	args := []any{completion.ProviderVersion}
+	if completion.ValueChanged {
+		args = append(args, refreshedAt)
+	}
+	args = append(args, refreshedAt, refreshedAt, s.dialect.FormatTime(completion.NextRefreshAt.UTC()),
+		refreshedAt, completion.VaultID, completion.CredentialKey, completion.ClaimOwner)
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(query), args...); err != nil {
+		return false, fmt.Errorf("completing credential refresh metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("committing credential refresh completion: %w", err)
+	}
+	return true, nil
+}
+
+func (s *SQLStore) FailCredentialRefresh(ctx context.Context, failure CredentialRefreshFailure) (bool, error) {
+	if failure.VaultID == "" || failure.CredentialKey == "" || failure.ClaimOwner == "" ||
+		failure.AttemptedAt.IsZero() || failure.NextRefreshAt.IsZero() ||
+		failure.ErrorCode == "" || len(failure.ErrorCode) > 128 || strings.ContainsAny(failure.ErrorCode, "\r\n\x00") {
+		return false, fmt.Errorf("credential refresh failure is invalid")
+	}
+	if failure.Health != CredentialSourceHealthError && failure.Health != CredentialSourceHealthStale {
+		return false, fmt.Errorf("credential refresh failure health is invalid")
+	}
+	result, err := s.db.ExecContext(ctx, s.dialect.Rebind(`UPDATE credential_sources
+		SET health = ?, last_error_code = ?, last_refresh_at = ?, next_refresh_at = ?,
+			refresh_failures = refresh_failures + 1, claim_owner = NULL, claim_until = NULL, updated_at = ?
+		WHERE vault_id = ? AND credential_key = ? AND claim_owner = ?`),
+		failure.Health, failure.ErrorCode, s.dialect.FormatTime(failure.AttemptedAt.UTC()),
+		s.dialect.FormatTime(failure.NextRefreshAt.UTC()), s.dialect.FormatTime(failure.AttemptedAt.UTC()),
+		failure.VaultID, failure.CredentialKey, failure.ClaimOwner)
+	if err != nil {
+		return false, fmt.Errorf("failing credential refresh: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	return count == 1, nil
+}
+
 const credentialSourceSelect = `SELECT vault_id, credential_key, mode, kind, provider_name, reference,
 	refresh_interval_seconds, max_staleness_seconds, provider_version, health, last_error_code,
-	cache_updated_at, last_refresh_at, last_success_at, next_refresh_at, created_at, updated_at
+	cache_updated_at, last_refresh_at, last_success_at, next_refresh_at,
+	refresh_failures, claim_owner, claim_until, created_at, updated_at
 	FROM credential_sources`
 
 func (s *SQLStore) scanCredentialSource(row rowScanner) (*CredentialSource, error) {
 	var source CredentialSource
-	var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, createdAt, updatedAt any
+	var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, claimUntil, createdAt, updatedAt any
+	var claimOwner sql.NullString
 	if err := row.Scan(&source.VaultID, &source.CredentialKey, &source.Mode, &source.Kind,
 		&source.ProviderName, &source.Reference, &source.RefreshIntervalSeconds,
 		&source.MaxStalenessSeconds, &source.ProviderVersion, &source.Health, &source.LastErrorCode,
-		&cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt, &nextRefreshAt, &createdAt, &updatedAt); err != nil {
+		&cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt, &nextRefreshAt,
+		&source.RefreshFailures, &claimOwner, &claimUntil, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	var err error
@@ -940,6 +1094,10 @@ func (s *SQLStore) scanCredentialSource(row rowScanner) (*CredentialSource, erro
 	}
 	if source.NextRefreshAt, err = s.dialect.ScanNullableTime(nextRefreshAt); err != nil {
 		return nil, fmt.Errorf("scanning credential source next refresh time: %w", err)
+	}
+	source.ClaimOwner = claimOwner.String
+	if source.ClaimUntil, err = s.dialect.ScanNullableTime(claimUntil); err != nil {
+		return nil, fmt.Errorf("scanning credential source claim time: %w", err)
 	}
 	if source.CreatedAt, err = s.dialect.ScanTime(createdAt); err != nil {
 		return nil, fmt.Errorf("scanning credential source created time: %w", err)
@@ -964,6 +1122,10 @@ func validateCredentialSource(source CredentialSource) error {
 	}
 	if source.RefreshIntervalSeconds < 10 || source.MaxStalenessSeconds < 0 {
 		return fmt.Errorf("credential source refresh interval must be at least 10 seconds and max staleness non-negative")
+	}
+	if source.MaxStalenessSeconds == 0 &&
+		(source.Kind != CredentialSourceInfisical || !strings.HasPrefix(source.ProviderName, "legacy-infisical-")) {
+		return fmt.Errorf("credential source max staleness must be positive")
 	}
 	switch source.Health {
 	case CredentialSourceHealthPending, CredentialSourceHealthOK, CredentialSourceHealthError, CredentialSourceHealthStale:

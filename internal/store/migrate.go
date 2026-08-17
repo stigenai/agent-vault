@@ -509,7 +509,8 @@ func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDi
 	rows, err := src.db.QueryContext(ctx, `SELECT vault_id, credential_key, mode, kind,
 		provider_name, reference, refresh_interval_seconds, max_staleness_seconds,
 		provider_version, health, last_error_code, cache_updated_at, last_refresh_at,
-		last_success_at, next_refresh_at, created_at, updated_at FROM credential_sources`)
+		last_success_at, next_refresh_at, refresh_failures, claim_owner, claim_until,
+		created_at, updated_at FROM credential_sources`)
 	if err != nil {
 		return 0, err
 	}
@@ -517,16 +518,16 @@ func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDi
 	n := 0
 	for rows.Next() {
 		var source CredentialSource
-		var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, createdAt, updatedAt any
+		var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, claimOwner, claimUntil, createdAt, updatedAt any
 		if err := rows.Scan(&source.VaultID, &source.CredentialKey, &source.Mode, &source.Kind,
 			&source.ProviderName, &source.Reference, &source.RefreshIntervalSeconds,
 			&source.MaxStalenessSeconds, &source.ProviderVersion, &source.Health,
 			&source.LastErrorCode, &cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt,
-			&nextRefreshAt, &createdAt, &updatedAt); err != nil {
+			&nextRefreshAt, &source.RefreshFailures, &claimOwner, &claimUntil, &createdAt, &updatedAt); err != nil {
 			return n, err
 		}
-		converted := make([]any, 6)
-		for i, value := range []any{cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, createdAt, updatedAt} {
+		converted := make([]any, 7)
+		for i, value := range []any{cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, claimUntil, createdAt, updatedAt} {
 			converted[i], err = convertTime(value, src.dialect, dstDialect)
 			if err != nil {
 				return n, err
@@ -536,12 +537,13 @@ func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDi
 			(vault_id, credential_key, mode, kind, provider_name, reference,
 			 refresh_interval_seconds, max_staleness_seconds, provider_version, health,
 			 last_error_code, cache_updated_at, last_refresh_at, last_success_at,
-			 next_refresh_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			 next_refresh_at, refresh_failures, claim_owner, claim_until, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 			source.VaultID, source.CredentialKey, source.Mode, source.Kind, source.ProviderName,
 			source.Reference, source.RefreshIntervalSeconds, source.MaxStalenessSeconds,
 			source.ProviderVersion, source.Health, source.LastErrorCode,
-			converted[0], converted[1], converted[2], converted[3], converted[4], converted[5]); err != nil {
+			converted[0], converted[1], converted[2], converted[3], source.RefreshFailures,
+			claimOwner, converted[4], converted[5], converted[6]); err != nil {
 			return n, err
 		}
 		n++
