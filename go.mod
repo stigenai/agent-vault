@@ -14,6 +14,8 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/posthog/posthog-go v1.16.1
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
+	github.com/spiffe/go-spiffe/v2 v2.8.1
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/term v0.45.0
@@ -88,7 +90,6 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/zerolog v1.26.1 // indirect
 	github.com/sony/gobreaker v0.5.0 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

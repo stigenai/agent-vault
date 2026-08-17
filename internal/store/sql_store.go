@@ -43,8 +43,6 @@ func utcTimePtr(t *time.Time) *time.Time {
 	return &u
 }
 
-
-
 // nullableString returns nil for empty strings, enabling SQL NULL inserts.
 func nullableString(s string) interface{} {
 	if s == "" {
@@ -2703,7 +2701,7 @@ func (s *SQLStore) CreateAgent(ctx context.Context, name, createdBy, role string
 	}, nil
 }
 
-func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []AgentVaultGrantSpec, expiresAt *time.Time) (*Agent, *Session, error) {
+func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []AgentVaultGrantSpec, expiresAt *time.Time) (*Agent, *Session, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("beginning transaction: %w", err)
@@ -2715,9 +2713,9 @@ func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, crea
 	nowStr := s.dialect.FormatTime(now)
 
 	_, err = tx.ExecContext(ctx,
-		s.dialect.Rebind(`INSERT INTO agents (id, name, role, status, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, 'active', ?, ?, ?)`),
-		agentID, name, role, createdBy, nowStr, nowStr,
+		s.dialect.Rebind(`INSERT INTO agents (id, name, spiffe_id, role, status, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`),
+		agentID, name, nullableString(spiffeID), role, createdBy, nowStr, nowStr,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating agent: %w", err)
@@ -2753,6 +2751,7 @@ func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, crea
 	ag := &Agent{
 		ID:        agentID,
 		Name:      name,
+		SPIFFEID:  spiffeID,
 		Role:      role,
 		Status:    "active",
 		CreatedBy: createdBy,
@@ -2765,8 +2764,24 @@ func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, crea
 
 func (s *SQLStore) GetAgentByID(ctx context.Context, id string) (*Agent, error) {
 	row := s.db.QueryRowContext(ctx,
-		s.dialect.Rebind(`SELECT id, name, role, status, created_by, created_at, updated_at, revoked_at
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
 		 FROM agents WHERE id = ?`), id,
+	)
+	ag, err := s.scanAgent(row)
+	if err != nil {
+		return nil, err
+	}
+	ag.Vaults, err = s.ListActorGrants(ctx, ag.ID)
+	if err != nil {
+		return nil, err
+	}
+	return ag, nil
+}
+
+func (s *SQLStore) GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*Agent, error) {
+	row := s.db.QueryRowContext(ctx,
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
+		 FROM agents WHERE spiffe_id = ?`), spiffeID,
 	)
 	ag, err := s.scanAgent(row)
 	if err != nil {
@@ -2792,7 +2807,7 @@ func (s *SQLStore) GetAgentNameByID(ctx context.Context, id string) (string, err
 
 func (s *SQLStore) GetAgentByName(ctx context.Context, name string) (*Agent, error) {
 	row := s.db.QueryRowContext(ctx,
-		s.dialect.Rebind(`SELECT id, name, role, status, created_by, created_at, updated_at, revoked_at
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
 		 FROM agents WHERE name = ?`), name,
 	)
 	ag, err := s.scanAgent(row)
@@ -2812,7 +2827,7 @@ func (s *SQLStore) ListAgents(ctx context.Context, vaultID string) ([]Agent, err
 		return nil, fmt.Errorf("vaultID is required; use ListAllAgents for cross-vault listing")
 	}
 	rows, err := s.db.QueryContext(ctx,
-		s.dialect.Rebind(`SELECT a.id, a.name, a.role, a.status, a.created_by, a.created_at, a.updated_at, a.revoked_at
+		s.dialect.Rebind(`SELECT a.id, a.name, a.spiffe_id, a.role, a.status, a.created_by, a.created_at, a.updated_at, a.revoked_at
 		 FROM agents a
 		 JOIN vault_grants vg ON vg.actor_id = a.id AND vg.actor_type = 'agent'
 		 WHERE vg.vault_id = ? ORDER BY a.name`), vaultID,
@@ -2845,7 +2860,7 @@ func (s *SQLStore) ListAgents(ctx context.Context, vaultID string) ([]Agent, err
 // ListAllAgents returns all agents with their vault grants.
 func (s *SQLStore) ListAllAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx,
-		s.dialect.Rebind(`SELECT id, name, role, status, created_by, created_at, updated_at, revoked_at
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
 		 FROM agents ORDER BY name`),
 	)
 	if err != nil {
@@ -3069,10 +3084,11 @@ func (s *SQLStore) CreateAgentToken(ctx context.Context, agentID string, expires
 // Expected column order: id, name, status, created_by, created_at, updated_at, revoked_at
 func (s *SQLStore) scanAgent(row *sql.Row) (*Agent, error) {
 	var ag Agent
+	var spiffeID sql.NullString
 	var createdAt, updatedAt interface{}
 	var revokedAt interface{}
 
-	if err := row.Scan(&ag.ID, &ag.Name, &ag.Role,
+	if err := row.Scan(&ag.ID, &ag.Name, &spiffeID, &ag.Role,
 		&ag.Status, &ag.CreatedBy, &createdAt, &updatedAt, &revokedAt); err != nil {
 		return nil, err
 	}
@@ -3080,15 +3096,17 @@ func (s *SQLStore) scanAgent(row *sql.Row) (*Agent, error) {
 	ag.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	ag.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 	ag.RevokedAt, _ = s.dialect.ScanNullableTime(revokedAt)
+	ag.SPIFFEID = spiffeID.String
 	return &ag, nil
 }
 
 func (s *SQLStore) scanAgentRow(rows *sql.Rows) (*Agent, error) {
 	var ag Agent
+	var spiffeID sql.NullString
 	var createdAt, updatedAt interface{}
 	var revokedAt interface{}
 
-	if err := rows.Scan(&ag.ID, &ag.Name, &ag.Role,
+	if err := rows.Scan(&ag.ID, &ag.Name, &spiffeID, &ag.Role,
 		&ag.Status, &ag.CreatedBy, &createdAt, &updatedAt, &revokedAt); err != nil {
 		return nil, err
 	}
@@ -3096,6 +3114,7 @@ func (s *SQLStore) scanAgentRow(rows *sql.Rows) (*Agent, error) {
 	ag.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	ag.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 	ag.RevokedAt, _ = s.dialect.ScanNullableTime(revokedAt)
+	ag.SPIFFEID = spiffeID.String
 	return &ag, nil
 }
 
@@ -3148,6 +3167,21 @@ func (s *SQLStore) UpdateAgentRole(ctx context.Context, agentID, role string) er
 	)
 	if err != nil {
 		return fmt.Errorf("updating agent role: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SQLStore) UpdateAgentSPIFFEID(ctx context.Context, agentID, spiffeID string) error {
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind("UPDATE agents SET spiffe_id = ?, updated_at = ? WHERE id = ?"),
+		nullableString(spiffeID), s.now(), agentID,
+	)
+	if err != nil {
+		return fmt.Errorf("updating agent SPIFFE ID: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {

@@ -24,6 +24,7 @@ var agentListCmd = &cobra.Command{
 		type agentListResult struct {
 			Agents []struct {
 				Name      string `json:"name"`
+				SPIFFEID  string `json:"spiffe_id"`
 				Role      string `json:"role"`
 				Status    string `json:"status"`
 				CreatedAt string `json:"created_at"`
@@ -44,7 +45,7 @@ var agentListCmd = &cobra.Command{
 		}
 
 		t := newTable(cmd.OutOrStdout())
-		t.AppendHeader(table.Row{"NAME", "ROLE", "STATUS", "VAULTS", "CREATED"})
+		t.AppendHeader(table.Row{"NAME", "SPIFFE ID", "ROLE", "STATUS", "VAULTS", "CREATED"})
 		for _, ag := range result.Agents {
 			var vaultParts []string
 			for _, v := range ag.Vaults {
@@ -54,7 +55,11 @@ var agentListCmd = &cobra.Command{
 			if vaults == "" {
 				vaults = "-"
 			}
-			t.AppendRow(table.Row{ag.Name, ag.Role, statusBadge(ag.Status), vaults, ag.CreatedAt})
+			spiffeID := ag.SPIFFEID
+			if spiffeID == "" {
+				spiffeID = "-"
+			}
+			t.AppendRow(table.Row{ag.Name, spiffeID, ag.Role, statusBadge(ag.Status), vaults, ag.CreatedAt})
 		}
 		t.Render()
 		return nil
@@ -79,15 +84,16 @@ var agentInfoCmd = &cobra.Command{
 		}
 
 		var info struct {
-			Name           string `json:"name"`
-			Role           string `json:"role"`
-			Status         string `json:"status"`
-			CreatedBy      string `json:"created_by"`
-			CreatedAt      string `json:"created_at"`
-			UpdatedAt      string `json:"updated_at"`
-			RevokedAt      *string `json:"revoked_at,omitempty"`
+			Name         string  `json:"name"`
+			SPIFFEID     string  `json:"spiffe_id"`
+			Role         string  `json:"role"`
+			Status       string  `json:"status"`
+			CreatedBy    string  `json:"created_by"`
+			CreatedAt    string  `json:"created_at"`
+			UpdatedAt    string  `json:"updated_at"`
+			RevokedAt    *string `json:"revoked_at,omitempty"`
 			ActiveTokens int     `json:"active_tokens"`
-			Vaults         []struct {
+			Vaults       []struct {
 				VaultName string `json:"vault_name"`
 				VaultRole string `json:"vault_role"`
 			} `json:"vaults"`
@@ -100,6 +106,9 @@ var agentInfoCmd = &cobra.Command{
 		_, _ = fmt.Fprintf(w, "%s\n", boldText("Agent: "+info.Name))
 		_, _ = fmt.Fprintf(w, "%s %s\n", fieldLabel("Role:"), info.Role)
 		_, _ = fmt.Fprintf(w, "%s %s\n", fieldLabel("Status:"), statusBadge(info.Status))
+		if info.SPIFFEID != "" {
+			_, _ = fmt.Fprintf(w, "%s %s\n", fieldLabel("SPIFFE ID:"), info.SPIFFEID)
+		}
 		_, _ = fmt.Fprintf(w, "%s %s\n", fieldLabel("Created:"), info.CreatedAt)
 		_, _ = fmt.Fprintf(w, "%s %s\n", fieldLabel("Updated:"), info.UpdatedAt)
 		if info.RevokedAt != nil {

@@ -562,7 +562,7 @@ func TestAgentCreateFlags(t *testing.T) {
 		t.Fatal("create command not found under agent")
 	}
 
-	for _, name := range []string{"vault", "role", "token-only"} {
+	for _, name := range []string{"vault", "role", "token-only", "spiffe-id"} {
 		if createCmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected agent create flag --%s to be registered", name)
 		}

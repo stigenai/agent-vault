@@ -354,6 +354,7 @@ type UnmatchedHost struct {
 type Agent struct {
 	ID        string
 	Name      string
+	SPIFFEID  string // exact workload identity; empty for legacy token-only agents
 	Role      string // "owner", "member", or "no-access" (instance-level role, like users)
 	Status    string // "active" or "revoked"
 	CreatedBy string // user ID of the creator
@@ -552,12 +553,14 @@ type Store interface {
 	// CreateAgentWithGrantsAndToken creates an agent, its vault grants, and its
 	// first agent token in a single transaction so partial failures cannot strand
 	// an agent row without a token or with half-applied grants.
-	CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*Agent, *Session, error)
+	CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*Agent, *Session, error)
 	GetAgentByID(ctx context.Context, id string) (*Agent, error)
+	GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*Agent, error)
 	GetAgentNameByID(ctx context.Context, id string) (string, error)
 	GetAgentByName(ctx context.Context, name string) (*Agent, error)
 	ListAgents(ctx context.Context, vaultID string) ([]Agent, error)
 	ListAllAgents(ctx context.Context) ([]Agent, error)
+	UpdateAgentSPIFFEID(ctx context.Context, agentID, spiffeID string) error
 	RevokeAgent(ctx context.Context, id string) error
 	DeleteAgent(ctx context.Context, id string) error
 	RenameAgent(ctx context.Context, id string, newName string) error

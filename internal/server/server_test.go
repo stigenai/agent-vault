@@ -389,9 +389,9 @@ func (m *mockStore) ExpirePendingProposals(_ context.Context, before time.Time) 
 	return 0, nil
 }
 
-func (m *mockStore) Close() error                                     { return nil }
-func (m *mockStore) Ping(_ context.Context) error                      { return nil }
-func (m *mockStore) DialectName() string                               { return "sqlite" }
+func (m *mockStore) Close() error                                         { return nil }
+func (m *mockStore) Ping(_ context.Context) error                         { return nil }
+func (m *mockStore) DialectName() string                                  { return "sqlite" }
 func (m *mockStore) GetCAState(_ context.Context) (*store.CAState, error) { return nil, nil }
 func (m *mockStore) SetCAState(_ context.Context, _ *store.CAState) error { return nil }
 
@@ -911,11 +911,17 @@ func (m *mockStore) CreateAgent(_ context.Context, name, createdBy, role string)
 	return ag, nil
 }
 
-func (m *mockStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, expiresAt *time.Time) (*store.Agent, *store.Session, error) {
+func (m *mockStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, expiresAt *time.Time) (*store.Agent, *store.Session, error) {
+	for _, existing := range m.agents {
+		if spiffeID != "" && existing.SPIFFEID == spiffeID {
+			return nil, nil, fmt.Errorf("UNIQUE constraint failed: agents.spiffe_id")
+		}
+	}
 	ag, err := m.CreateAgent(ctx, name, createdBy, role)
 	if err != nil {
 		return nil, nil, err
 	}
+	ag.SPIFFEID = spiffeID
 	for _, vg := range vaultGrants {
 		if err := m.GrantVaultRole(ctx, ag.ID, "agent", vg.VaultID, vg.Role); err != nil {
 			return nil, nil, err
@@ -926,6 +932,15 @@ func (m *mockStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, cre
 		return nil, nil, err
 	}
 	return ag, sess, nil
+}
+
+func (m *mockStore) GetAgentBySPIFFEID(_ context.Context, spiffeID string) (*store.Agent, error) {
+	for _, ag := range m.agents {
+		if ag.SPIFFEID == spiffeID {
+			return ag, nil
+		}
+	}
+	return nil, fmt.Errorf("agent not found")
 }
 
 func (m *mockStore) GetAgentByName(_ context.Context, name string) (*store.Agent, error) {
@@ -992,6 +1007,21 @@ func (m *mockStore) ListAllAgents(_ context.Context) ([]store.Agent, error) {
 		result = append(result, *ag)
 	}
 	return result, nil
+}
+
+func (m *mockStore) UpdateAgentSPIFFEID(_ context.Context, agentID, spiffeID string) error {
+	for _, existing := range m.agents {
+		if existing.ID != agentID && spiffeID != "" && existing.SPIFFEID == spiffeID {
+			return fmt.Errorf("UNIQUE constraint failed: agents.spiffe_id")
+		}
+	}
+	for _, ag := range m.agents {
+		if ag.ID == agentID {
+			ag.SPIFFEID = spiffeID
+			return nil
+		}
+	}
+	return fmt.Errorf("agent not found")
 }
 
 func (m *mockStore) RevokeAgent(_ context.Context, id string) error {
@@ -4048,6 +4078,67 @@ func TestHandleAgentCreate_DefaultsToNoAccess(t *testing.T) {
 	}
 	if ag := ms.agents["newbot"]; ag == nil || ag.Role != "no-access" {
 		t.Fatalf("expected persisted agent role=no-access, got %+v", ag)
+	}
+}
+
+func TestHandleAgentCreateAndUpdateSPIFFEID(t *testing.T) {
+	srv, ms, sessID := setupAgentTest(t)
+	spiffeID := "spiffe://cluster.example/ns/agents/sa/newbot"
+	body := strings.NewReader(`{"name":"newbot","spiffe_id":"` + spiffeID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents", body)
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created["spiffe_id"] != spiffeID || ms.agents["newbot"].SPIFFEID != spiffeID {
+		t.Fatalf("SPIFFE ID not persisted/reported: %#v", created)
+	}
+
+	updated := "spiffe://cluster.example/ns/agents/sa/updated"
+	req = httptest.NewRequest(http.MethodPut, "/v1/agents/newbot/spiffe-id", strings.NewReader(`{"spiffe_id":"`+updated+`"}`))
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || ms.agents["newbot"].SPIFFEID != updated {
+		t.Fatalf("update status = %d, agent = %#v, body=%s", rec.Code, ms.agents["newbot"], rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/newbot", nil)
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), updated) {
+		t.Fatalf("get status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAgentSPIFFEIDRejectsInvalidAndDuplicateIdentity(t *testing.T) {
+	srv, _, sessID := setupAgentTest(t)
+	requestCreate := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/agents", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+sessID)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := requestCreate(`{"name":"invalidbot","spiffe_id":"https://not-spiffe.example/workload"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid ID status = %d: %s", rec.Code, rec.Body.String())
+	}
+	spiffeID := "spiffe://cluster.example/ns/agents/sa/shared"
+	if rec := requestCreate(`{"name":"firstbot","spiffe_id":"` + spiffeID + `"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("first create = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := requestCreate(`{"name":"secondbot","spiffe_id":"` + spiffeID + `"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate ID status = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

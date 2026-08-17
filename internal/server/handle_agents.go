@@ -11,6 +11,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 // reservedVaultNames are names that conflict with /vaults/* frontend routes.
@@ -29,6 +30,25 @@ func validVaultRole(s string) bool {
 	return s == "proxy" || s == "member" || s == "admin"
 }
 
+func validateAgentSPIFFEID(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	id, err := spiffeid.FromString(raw)
+	if err != nil || id.String() != raw {
+		return fmt.Errorf("invalid SPIFFE ID")
+	}
+	return nil
+}
+
+func isUniqueAgentConstraint(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unique constraint") || strings.Contains(message, "duplicate key")
+}
+
 func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -42,9 +62,10 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 		VaultRole string `json:"vault_role"`
 	}
 	var req struct {
-		Name   string     `json:"name"`
-		Role   string     `json:"role"` // instance-level role: "owner", "member", or "no-access" (default: "no-access")
-		Vaults []vaultReq `json:"vaults"`
+		Name     string     `json:"name"`
+		SPIFFEID string     `json:"spiffe_id"`
+		Role     string     `json:"role"` // instance-level role: "owner", "member", or "no-access" (default: "no-access")
+		Vaults   []vaultReq `json:"vaults"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid request body")
@@ -57,6 +78,10 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := broker.ValidateSlug(req.Name); err != nil {
 		jsonError(w, http.StatusBadRequest, "Agent name must be 3-64 characters, lowercase alphanumeric and hyphens only")
+		return
+	}
+	if err := validateAgentSPIFFEID(req.SPIFFEID); err != nil {
+		jsonError(w, http.StatusBadRequest, "spiffe_id must be an exact valid SPIFFE ID")
 		return
 	}
 
@@ -112,10 +137,14 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 		grantSpecs = append(grantSpecs, store.AgentVaultGrantSpec{VaultID: v.VaultID, Role: v.VaultRole})
 		vaultInfos = append(vaultInfos, agentVaultJSON{VaultName: v.VaultName, VaultRole: v.VaultRole})
 	}
-	agent, sess, err := s.store.CreateAgentWithGrantsAndToken(ctx, req.Name, actor.ID, agentRole, grantSpecs, nil)
+	agent, sess, err := s.store.CreateAgentWithGrantsAndToken(ctx, req.Name, req.SPIFFEID, actor.ID, agentRole, grantSpecs, nil)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint") {
-			jsonError(w, http.StatusConflict, fmt.Sprintf("An agent named %q already exists", req.Name))
+		if isUniqueAgentConstraint(err) {
+			if strings.Contains(strings.ToLower(err.Error()), "spiffe") {
+				jsonError(w, http.StatusConflict, "SPIFFE ID is already assigned to another agent")
+			} else {
+				jsonError(w, http.StatusConflict, fmt.Sprintf("An agent named %q already exists", req.Name))
+			}
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[agent-vault] ERROR: CreateAgentWithGrantsAndToken(%q): %v\n", req.Name, err)
@@ -127,6 +156,7 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 	jsonCreated(w, map[string]interface{}{
 		"av_agent_token": sess.ID,
 		"name":           agent.Name,
+		"spiffe_id":      agent.SPIFFEID,
 		"role":           agent.Role,
 		"vaults":         vaultInfos,
 		"created_at":     agent.CreatedAt.Format(time.RFC3339),
@@ -164,6 +194,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 
 	type agentItem struct {
 		Name           string           `json:"name"`
+		SPIFFEID       string           `json:"spiffe_id,omitempty"`
 		Role           string           `json:"role"`
 		Status         string           `json:"status"`
 		Vaults         []agentVaultJSON `json:"vaults"`
@@ -176,6 +207,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	for _, ag := range agents {
 		item := agentItem{
 			Name:      ag.Name,
+			SPIFFEID:  ag.SPIFFEID,
 			Role:      ag.Role,
 			Status:    ag.Status,
 			Vaults:    agentVaultsJSON(&ag),
@@ -226,6 +258,7 @@ func (s *Server) handleAgentGet(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"name":       agent.Name,
+		"spiffe_id":  agent.SPIFFEID,
 		"role":       agent.Role,
 		"status":     agent.Status,
 		"vaults":     agentVaultsJSON(agent),
@@ -415,6 +448,38 @@ func (s *Server) handleAgentRename(w http.ResponseWriter, r *http.Request) {
 		"old_name": name,
 		"new_name": body.Name,
 	})
+}
+
+func (s *Server) handleAgentSetSPIFFEID(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if _, err := s.requireOwnerActor(w, r); err != nil {
+		return
+	}
+	agent, err := s.store.GetAgentByName(ctx, r.PathValue("name"))
+	if err != nil || agent == nil {
+		jsonError(w, http.StatusNotFound, "Agent not found")
+		return
+	}
+	var body struct {
+		SPIFFEID *string `json:"spiffe_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SPIFFEID == nil {
+		jsonError(w, http.StatusBadRequest, `Request body must include {"spiffe_id":"spiffe://..."}; use an empty string to clear`)
+		return
+	}
+	if err := validateAgentSPIFFEID(*body.SPIFFEID); err != nil {
+		jsonError(w, http.StatusBadRequest, "spiffe_id must be empty or an exact valid SPIFFE ID")
+		return
+	}
+	if err := s.store.UpdateAgentSPIFFEID(ctx, agent.ID, *body.SPIFFEID); err != nil {
+		if isUniqueAgentConstraint(err) {
+			jsonError(w, http.StatusConflict, "SPIFFE ID is already assigned to another agent")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "Failed to update agent SPIFFE ID")
+		return
+	}
+	jsonOK(w, map[string]string{"name": agent.Name, "spiffe_id": *body.SPIFFEID})
 }
 
 func (s *Server) handleVaultAgentList(w http.ResponseWriter, r *http.Request) {

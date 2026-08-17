@@ -17,6 +17,7 @@ var agentCreateCmd = &cobra.Command{
 		vaultFlags, _ := cmd.Flags().GetStringArray("vault")
 		tokenOnly, _ := cmd.Flags().GetBool("token-only")
 		agentRole, _ := cmd.Flags().GetString("role")
+		spiffeID, _ := cmd.Flags().GetString("spiffe-id")
 		if !validInstanceRole(agentRole) {
 			return fmt.Errorf("role must be one of: %s", instanceRoleHelp)
 		}
@@ -45,8 +46,9 @@ var agentCreateCmd = &cobra.Command{
 		}
 
 		payload := map[string]any{
-			"name": agentName,
-			"role": agentRole,
+			"name":      agentName,
+			"role":      agentRole,
+			"spiffe_id": spiffeID,
 		}
 		if len(vaults) > 0 {
 			payload["vaults"] = vaults
@@ -66,6 +68,7 @@ var agentCreateCmd = &cobra.Command{
 		var resp struct {
 			AvAgentToken string `json:"av_agent_token"`
 			Name         string `json:"name"`
+			SPIFFEID     string `json:"spiffe_id"`
 			Role         string `json:"role"`
 			Vaults       []struct {
 				VaultName string `json:"vault_name"`
@@ -84,6 +87,9 @@ var agentCreateCmd = &cobra.Command{
 
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s Agent %q created (role %s).\n", successText("✓"), resp.Name, resp.Role)
+		if resp.SPIFFEID != "" {
+			fmt.Fprintf(w, "%s %s\n", fieldLabel("SPIFFE ID:"), resp.SPIFFEID)
+		}
 		if len(resp.Vaults) > 0 {
 			fmt.Fprintf(w, "%s\n", fieldLabel("Vaults:"))
 			for _, v := range resp.Vaults {
@@ -112,6 +118,7 @@ func init() {
 	agentCreateCmd.Flags().StringArray("vault", nil, "vault pre-assignment (format: name:role, role defaults to proxy)")
 	agentCreateCmd.Flags().Bool("token-only", false, "output only the raw agent token (for programmatic use)")
 	agentCreateCmd.Flags().String("role", "no-access", "instance-level role for the agent (owner, member, or no-access)")
+	agentCreateCmd.Flags().String("spiffe-id", "", "exact SPIFFE ID to bind to this agent")
 	agentCreateCmd.Flags().String("address", "", "Agent Vault server address (defaults to session address)")
 	topAgentCmd.AddCommand(agentCreateCmd)
 }

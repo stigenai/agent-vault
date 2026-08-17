@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1449,7 +1450,6 @@ func TestCascadeDeleteVaultRemovesProposals(t *testing.T) {
 	}
 }
 
-
 // --- UUID ---
 
 func TestNewUUIDUniqueness(t *testing.T) {
@@ -1677,7 +1677,6 @@ func TestDeleteUserSessions(t *testing.T) {
 	}
 }
 
-
 func TestDeleteUserCascadesGrants(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -1722,7 +1721,7 @@ func TestCreateAgentWithGrantsAndToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "txbot", "creator-uid", "member",
+	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "txbot", "", "creator-uid", "member",
 		[]AgentVaultGrantSpec{{VaultID: ns.ID, Role: "proxy"}}, nil)
 	if err != nil {
 		t.Fatalf("CreateAgentWithGrantsAndToken: %v", err)
@@ -1747,7 +1746,7 @@ func TestCreateAgentWithGrantsAndToken_NoVaults(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "barebot", "creator-uid", "member", nil, nil)
+	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "barebot", "", "creator-uid", "member", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateAgentWithGrantsAndToken: %v", err)
 	}
@@ -1756,6 +1755,45 @@ func TestCreateAgentWithGrantsAndToken_NoVaults(t *testing.T) {
 	}
 	if n, _ := s.CountAgentTokens(ctx, ag.ID); n != 1 {
 		t.Fatalf("expected 1 token, got %d", n)
+	}
+}
+
+func TestAgentSPIFFEIDIsUniqueExactAndUpdatable(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	spiffeID := "spiffe://cluster.example/ns/agents/sa/tool-agent"
+
+	ag, _, err := s.CreateAgentWithGrantsAndToken(ctx, "spiffe-agent", spiffeID, "creator-uid", "member", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ag.SPIFFEID != spiffeID {
+		t.Fatalf("created SPIFFE ID = %q", ag.SPIFFEID)
+	}
+	got, err := s.GetAgentBySPIFFEID(ctx, spiffeID)
+	if err != nil || got.ID != ag.ID || got.SPIFFEID != spiffeID {
+		t.Fatalf("exact lookup = %#v, %v", got, err)
+	}
+	if _, _, err := s.CreateAgentWithGrantsAndToken(ctx, "duplicate-spiffe", spiffeID, "creator-uid", "member", nil, nil); err == nil {
+		t.Fatal("duplicate SPIFFE ID was accepted")
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, strings.ToUpper(spiffeID)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("case-changed lookup error = %v, want sql.ErrNoRows", err)
+	}
+
+	updated := "spiffe://cluster.example/ns/agents/sa/renamed"
+	if err := s.UpdateAgentSPIFFEID(ctx, ag.ID, updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetAgentBySPIFFEID(ctx, updated)
+	if err != nil || got.ID != ag.ID {
+		t.Fatalf("updated lookup = %#v, %v", got, err)
+	}
+	if err := s.UpdateAgentSPIFFEID(ctx, ag.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, updated); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cleared lookup error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -1954,7 +1992,6 @@ func TestGetSessionBackwardCompat(t *testing.T) {
 		t.Fatalf("expected empty agent_id for old session, got %q", fetched.AgentID)
 	}
 }
-
 
 func TestDeleteAgentTokens(t *testing.T) {
 	s := openTestDB(t)

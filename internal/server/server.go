@@ -382,12 +382,14 @@ type Store interface {
 
 	// Agents
 	CreateAgent(ctx context.Context, name, createdBy, role string) (*store.Agent, error)
-	CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*store.Agent, *store.Session, error)
+	CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*store.Agent, *store.Session, error)
 	GetAgentByID(ctx context.Context, id string) (*store.Agent, error)
+	GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*store.Agent, error)
 	GetAgentNameByID(ctx context.Context, id string) (string, error)
 	GetAgentByName(ctx context.Context, name string) (*store.Agent, error)
 	ListAgents(ctx context.Context, vaultID string) ([]store.Agent, error)
 	ListAllAgents(ctx context.Context) ([]store.Agent, error)
+	UpdateAgentSPIFFEID(ctx context.Context, agentID, spiffeID string) error
 	RevokeAgent(ctx context.Context, id string) error
 	DeleteAgent(ctx context.Context, id string) error
 	RenameAgent(ctx context.Context, id string, newName string) error
@@ -876,6 +878,7 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("POST /v1/agents/{name}/delete", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentDelete)))))
 	mux.HandleFunc("POST /v1/agents/{name}/rotate", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRotate)))))
 	mux.HandleFunc("POST /v1/agents/{name}/rename", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRename)))))
+	mux.HandleFunc("PUT /v1/agents/{name}/spiffe-id", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentSetSPIFFEID)))))
 	mux.HandleFunc("POST /v1/agents/{name}/role", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentSetRole)))))
 
 	// Vault-level agent management
