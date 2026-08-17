@@ -111,14 +111,23 @@ type Encryption struct {
 }
 
 type KeyWrapperConfig struct {
-	Name   string               `toml:"name"`
-	Kind   string               `toml:"kind"`
-	AWSKMS *AWSKMSWrapperConfig `toml:"aws_kms"`
+	Name    string                `toml:"name"`
+	Kind    string                `toml:"kind"`
+	AWSKMS  *AWSKMSWrapperConfig  `toml:"aws_kms"`
+	OpenBao *OpenBaoWrapperConfig `toml:"openbao"`
 }
 
 type AWSKMSWrapperConfig struct {
 	KeyARN string `toml:"key_arn"`
 	Region string `toml:"region"`
+}
+
+type OpenBaoWrapperConfig struct {
+	Address   string `toml:"address"`
+	Mount     string `toml:"mount"`
+	KeyName   string `toml:"key_name"`
+	AuthMount string `toml:"auth_mount"`
+	Role      string `toml:"role"`
 }
 
 type SMTP struct {
@@ -416,6 +425,10 @@ func validateKeyWrappers(encryption Encryption) error {
 		case "aws-kms":
 			if wrapper.AWSKMS == nil || strings.TrimSpace(wrapper.AWSKMS.KeyARN) == "" || strings.TrimSpace(wrapper.AWSKMS.Region) == "" {
 				return fmt.Errorf("encryption.wrappers[%d].aws_kms: key_arn and region are required", i)
+			}
+		case "openbao-transit":
+			if wrapper.OpenBao == nil || strings.TrimSpace(wrapper.OpenBao.Address) == "" || strings.TrimSpace(wrapper.OpenBao.KeyName) == "" || strings.TrimSpace(wrapper.OpenBao.Role) == "" {
+				return fmt.Errorf("encryption.wrappers[%d].openbao: address, key_name, and role are required", i)
 			}
 		default:
 			return fmt.Errorf("encryption.wrappers[%d].kind: unsupported %q", i, wrapper.Kind)

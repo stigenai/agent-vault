@@ -39,3 +39,27 @@ func TestKeyWrapperTOMLFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenBaoWrapperTOML(t *testing.T) {
+	path := writeConfig(t, "openbao.toml", `schema_version = 1
+[encryption]
+primary_wrapper = "bao-primary"
+[[encryption.wrappers]]
+name = "bao-primary"
+kind = "openbao-transit"
+[encryption.wrappers.openbao]
+address = "https://openbao.example"
+mount = "transit"
+key_name = "agent-vault"
+auth_mount = "cert"
+role = "agent-vault"
+`)
+	result, err := Load(Options{Path: path, LookupEnv: emptyEnv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bao := result.Config.Encryption.Wrappers[0].OpenBao
+	if bao == nil || bao.KeyName != "agent-vault" || bao.Role != "agent-vault" {
+		t.Fatalf("OpenBao config = %#v", bao)
+	}
+}
