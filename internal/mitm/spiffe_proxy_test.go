@@ -10,14 +10,19 @@ import (
 	"crypto/x509/pkix"
 	"database/sql"
 	"errors"
+	"io"
+	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -83,6 +88,65 @@ func TestAuthenticateRequestSPIFFEOnlyRejectsBearer(t *testing.T) {
 	req.Header.Set("Proxy-Authorization", "Bearer legacy")
 	if _, err := p.authenticateRequest(req); !errors.Is(err, brokercore.ErrInvalidSession) {
 		t.Fatalf("SPIFFE-only proxy accepted bearer: %v", err)
+	}
+}
+
+func TestSPIFFEForwardAuditUsesBackingAgentIdentity(t *testing.T) {
+	const id = "spiffe://cluster.example/ns/agents/sa/worker"
+	cert := proxySPIFFECertificate(t, id)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	upstreamHost, _, err := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &capturingAgentResolver{}
+	sink := &recordingSink{}
+	p := New("127.0.0.1:0", Options{
+		Peers:      resolver,
+		Agents:     spiffeAgentLookup{id: {ID: "agent-spiffe", SPIFFEID: id, Status: "active"}},
+		SPIFFEOnly: true,
+		Credentials: &fakeCredProvider{byHost: map[string]fakeInjectResult{
+			upstreamHost: {result: &brokercore.InjectResult{Passthrough: true}},
+		}},
+		Logger:                  slog.New(slog.DiscardHandler),
+		RateLimit:               ratelimit.New(ratelimit.DefaultsFor(ratelimit.ProfileOff)),
+		LogSink:                 sink,
+		AllowPrivateRanges:      true,
+		NetworkPolicyConfigured: true,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/audit", nil)
+	req.Header.Set("X-Vault", "production")
+	req.Header.Set("Proxy-Authorization", "Bearer must-not-be-used")
+	req.TLS = &tls.ConnectionState{
+		HandshakeComplete: true,
+		PeerCertificates:  []*x509.Certificate{cert},
+		VerifiedChains:    [][]*x509.Certificate{{cert}},
+	}
+	rec := httptest.NewRecorder()
+	p.dispatch(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forward status = %d, want 200", rec.Code)
+	}
+
+	rows := sink.snapshot()
+	if len(rows) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.ActorType != brokercore.ActorTypeAgent || row.ActorID != "agent-spiffe" {
+		t.Fatalf("audit actor = %q/%q, want agent/agent-spiffe", row.ActorType, row.ActorID)
+	}
+	if row.VaultID != "vault-1" {
+		t.Fatalf("audit vault = %q, want vault-1", row.VaultID)
+	}
+	if resolver.agentID != "agent-spiffe" || resolver.hint != "production" {
+		t.Fatalf("resolver input = %q/%q, want agent-spiffe/production", resolver.agentID, resolver.hint)
 	}
 }
 
