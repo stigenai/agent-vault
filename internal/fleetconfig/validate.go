@@ -204,7 +204,7 @@ func serviceFromRaw(raw rawService) Service {
 }
 
 func validateService(vaultName string, service *Service) error {
-	brokerService := service.brokerService()
+	brokerService := service.BrokerService()
 	if err := broker.NormalizePort(&brokerService); err != nil {
 		return fmt.Errorf("vault %q service %q: %w", vaultName, service.Name, err)
 	}
@@ -361,7 +361,7 @@ func validateServiceCredentialRefs(vault Vault) error {
 		available[item.Name] = struct{}{}
 	}
 	for _, service := range vault.Services {
-		brokerService := service.brokerService()
+		brokerService := service.BrokerService()
 		for _, key := range brokerService.CredentialKeys() {
 			if _, ok := available[key]; !ok {
 				return fmt.Errorf("vault %q service %q references undefined credential %q", vault.Name, service.Name, key)

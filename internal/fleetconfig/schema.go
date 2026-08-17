@@ -103,7 +103,9 @@ type Import struct {
 	ProviderKind string `json:"provider_kind,omitempty"`
 }
 
-func (s Service) brokerService() broker.Service {
+// BrokerService converts the validated declarative service into the broker's
+// runtime representation without resolving any credential.
+func (s Service) BrokerService() broker.Service {
 	auth := broker.Auth{
 		Type:     s.Auth.Kind,
 		Username: s.Auth.Username,
