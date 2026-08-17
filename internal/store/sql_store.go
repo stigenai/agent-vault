@@ -1861,6 +1861,72 @@ func (s *SQLStore) PromoteDEKWrapping(ctx context.Context, targetID string, clea
 		return fmt.Errorf("beginning DEK wrapping promotion: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.promoteDEKWrappingTx(ctx, tx, targetID, clearPlaintext); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing DEK wrapping promotion: %w", err)
+	}
+	return nil
+}
+
+// PromoteDEKWrappingWithRecoveryAudit makes the new verified primary and its
+// secret-free recovery audit event indivisible. A crash cannot leave an
+// unaudited successful recovery.
+func (s *SQLStore) PromoteDEKWrappingWithRecoveryAudit(ctx context.Context, targetID string, event KeyRecoveryEvent) error {
+	if event.ActorID == "" || event.ActorSPIFFEID == "" || event.RecoveryWrappingID == "" {
+		return fmt.Errorf("recovery audit actor and wrapping are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning recovery promotion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var actorSPIFFEID, actorRole, actorStatus string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT spiffe_id, role, status FROM agents WHERE id = ?`)+s.dialect.ForUpdateClause(),
+		event.ActorID).Scan(&actorSPIFFEID, &actorRole, &actorStatus); err != nil {
+		return fmt.Errorf("authorizing recovery actor: %w", err)
+	}
+	if actorSPIFFEID != event.ActorSPIFFEID || actorRole != "owner" || actorStatus != "active" {
+		return fmt.Errorf("recovery actor is not an active SPIFFE instance owner")
+	}
+	if err := s.promoteDEKWrappingTx(ctx, tx, targetID, true); err != nil {
+		return err
+	}
+	var recoveryProvider, recoveryKeyID string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT provider, key_id FROM dek_wrappings WHERE id = ? AND master_key_id = 1`),
+		event.RecoveryWrappingID).Scan(&recoveryProvider, &recoveryKeyID); err != nil {
+		return fmt.Errorf("selecting recovery wrapping for audit: %w", err)
+	}
+	var targetProvider, targetKeyID, targetKeyVersion string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT provider, key_id, key_version FROM dek_wrappings WHERE id = ? AND master_key_id = 1`),
+		targetID).Scan(&targetProvider, &targetKeyID, &targetKeyVersion); err != nil {
+		return fmt.Errorf("selecting new primary for recovery audit: %w", err)
+	}
+	if event.ID == "" {
+		event.ID = newUUID()
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO key_recovery_events
+		(id, actor_id, actor_spiffe_id, recovery_wrapping_id, recovery_provider, recovery_key_id,
+		 new_primary_wrapping_id, new_primary_provider, new_primary_key_id, new_primary_key_version, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		event.ID, event.ActorID, event.ActorSPIFFEID, event.RecoveryWrappingID, recoveryProvider, recoveryKeyID,
+		targetID, targetProvider, targetKeyID, targetKeyVersion, s.dialect.FormatTime(event.CreatedAt)); err != nil {
+		return fmt.Errorf("recording key recovery audit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing recovery promotion: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLStore) promoteDEKWrappingTx(ctx context.Context, tx *sql.Tx, targetID string, clearPlaintext bool) error {
 	var masterID int
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM master_key WHERE id = 1`+s.dialect.ForUpdateClause()).Scan(&masterID); err != nil {
 		return fmt.Errorf("locking master key for wrapping promotion: %w", err)
@@ -1887,10 +1953,38 @@ func (s *SQLStore) PromoteDEKWrapping(ctx context.Context, targetID string, clea
 			return fmt.Errorf("clearing legacy plaintext DEK: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing DEK wrapping promotion: %w", err)
-	}
 	return nil
+}
+
+func (s *SQLStore) ListKeyRecoveryEvents(ctx context.Context, limit int) ([]KeyRecoveryEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(`SELECT id, actor_id, actor_spiffe_id,
+		recovery_wrapping_id, recovery_provider, recovery_key_id, new_primary_wrapping_id,
+		new_primary_provider, new_primary_key_id, new_primary_key_version, created_at
+		FROM key_recovery_events ORDER BY created_at DESC, id DESC LIMIT ?`), limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing key recovery events: %w", err)
+	}
+	defer rows.Close()
+	var events []KeyRecoveryEvent
+	for rows.Next() {
+		var event KeyRecoveryEvent
+		var createdAt any
+		if err := rows.Scan(&event.ID, &event.ActorID, &event.ActorSPIFFEID,
+			&event.RecoveryWrappingID, &event.RecoveryProvider, &event.RecoveryKeyID,
+			&event.NewPrimaryWrappingID, &event.NewPrimaryProvider, &event.NewPrimaryKeyID,
+			&event.NewPrimaryKeyVersion, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning key recovery event: %w", err)
+		}
+		event.CreatedAt, err = s.dialect.ScanTime(createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("scanning key recovery event time: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 // --- Broker Configs ---

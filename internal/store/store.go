@@ -152,6 +152,29 @@ type KeyWrappingStore interface {
 	PromoteDEKWrapping(context.Context, string, bool) error
 }
 
+// KeyRecoveryEvent is deliberately limited to public routing and actor
+// metadata. It never contains a DEK, wrapping ciphertext, identity text, or
+// provider response.
+type KeyRecoveryEvent struct {
+	ID                   string
+	ActorID              string
+	ActorSPIFFEID        string
+	RecoveryWrappingID   string
+	RecoveryProvider     string
+	RecoveryKeyID        string
+	NewPrimaryWrappingID string
+	NewPrimaryProvider   string
+	NewPrimaryKeyID      string
+	NewPrimaryKeyVersion string
+	CreatedAt            time.Time
+}
+
+type KeyRecoveryStore interface {
+	KeyWrappingStore
+	PromoteDEKWrappingWithRecoveryAudit(context.Context, string, KeyRecoveryEvent) error
+	ListKeyRecoveryEvents(context.Context, int) ([]KeyRecoveryEvent, error)
+}
+
 // Session represents an authenticated session.
 // User sessions: VaultID may be set (scoped) or empty (global login).
 // Agent tokens: VaultID is empty; vault resolved per-request via X-Vault header.

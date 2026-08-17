@@ -97,16 +97,20 @@ bootstrap_owner_ids = [
 
 [encryption]
 primary_wrapper = "aws-production"
-recovery_wrapper = "offline-local"
 
 [[encryption.wrappers]]
 name = "aws-production"
 kind = "aws-kms"
-key_id = "arn:aws:kms:us-east-1:123456789012:key/uuid"
+
+[encryption.wrappers.aws_kms]
+key_arn = "arn:aws:kms:us-east-1:123456789012:key/uuid"
+region = "us-east-1"
 
 [[encryption.wrappers]]
 name = "offline-local"
 kind = "age-x25519"
+
+[encryption.wrappers.age]
 recipient = "age1..."
 # The identity is supplied only to an explicit recovery command.
 

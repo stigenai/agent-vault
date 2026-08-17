@@ -38,6 +38,20 @@ func EnsureInstanceBinding(ctx context.Context, persistence store.KeyWrappingSto
 // remains as a rolling-version compatibility path; plaintext legacy storage is
 // cleared in the promotion transaction.
 func EnsurePrimary(ctx context.Context, persistence store.KeyWrappingStore, wrapper KeyWrapper, dek []byte, binding Binding) (*store.DEKWrappingRecord, error) {
+	return ensurePrimary(ctx, persistence, wrapper, dek, binding, func(record *store.DEKWrappingRecord) error {
+		return persistence.PromoteDEKWrapping(ctx, record.ID, true)
+	})
+}
+
+// EnsureRecoveryPrimary follows the same verified add-before-retire workflow,
+// but commits promotion together with a secret-free recovery audit record.
+func EnsureRecoveryPrimary(ctx context.Context, persistence store.KeyRecoveryStore, wrapper KeyWrapper, dek []byte, binding Binding, event store.KeyRecoveryEvent) (*store.DEKWrappingRecord, error) {
+	return ensurePrimary(ctx, persistence, wrapper, dek, binding, func(record *store.DEKWrappingRecord) error {
+		return persistence.PromoteDEKWrappingWithRecoveryAudit(ctx, record.ID, event)
+	})
+}
+
+func ensurePrimary(ctx context.Context, persistence store.KeyWrappingStore, wrapper KeyWrapper, dek []byte, binding Binding, promote func(*store.DEKWrappingRecord) error) (*store.DEKWrappingRecord, error) {
 	wrapped, err := WrapAndVerify(ctx, wrapper, dek, binding)
 	if err != nil {
 		return nil, err
@@ -56,7 +70,7 @@ func EnsurePrimary(ctx context.Context, persistence store.KeyWrappingStore, wrap
 	if err := verifyPersisted(ctx, wrapper, record, dek, binding); err != nil {
 		return nil, err
 	}
-	if err := persistence.PromoteDEKWrapping(ctx, record.ID, true); err != nil {
+	if err := promote(record); err != nil {
 		return nil, err
 	}
 	primary, err := persistence.GetPrimaryDEKWrapping(ctx)

@@ -94,6 +94,9 @@ All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP add
 | `client.workload_api` | empty | `SPIFFE_ENDPOINT_SOCKET` |
 | `client.trust_domains` | `[]` | `AGENT_VAULT_SPIFFE_TRUST_DOMAINS` |
 | `encryption.legacy_master_password` | empty (passwordless compatibility mode) | `AGENT_VAULT_MASTER_PASSWORD`; secret reference in TOML |
+| `encryption.primary_wrapper` | empty | none; must name a configured non-recovery wrapper |
+| `encryption.wrappers[].name` | none | none; unique stable configuration name |
+| `encryption.wrappers[].kind` | none | `aws-kms`, `openbao-transit`, or recovery-only `age-x25519` |
 | `smtp.host` | empty (SMTP disabled) | `AGENT_VAULT_SMTP_HOST` |
 | `smtp.port` | `587` | `AGENT_VAULT_SMTP_PORT` |
 | `smtp.username` | empty | `AGENT_VAULT_SMTP_USERNAME` |
@@ -110,6 +113,12 @@ All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP add
 | `telemetry.enabled` | `true` | `AGENT_VAULT_TELEMETRY` / `--telemetry` |
 
 Legacy `AGENT_VAULT_RATELIMIT_<TIER>_<KNOB>` variables remain supported for per-tier overrides. They are applied once during startup on top of `rate_limit.profile`; `rate_limit.locked = true` prevents instance-setting overrides.
+
+### DEK wrappers and offline recovery
+
+When `encryption.wrappers` is non-empty, `primary_wrapper` is required and must select AWS KMS or OpenBao Transit. AWS wrappers configure `aws_kms.key_arn` and `aws_kms.region`. OpenBao wrappers configure `openbao.address`, `mount`, `key_name`, `auth_mount`, and `role`; their provider access uses the server's rotating SPIFFE X.509-SVID. An `age-x25519` wrapper contains only `age.recipient` and can never be the primary.
+
+Startup uses only the persisted provider primary and fails closed when it is unavailable. Changing `primary_wrapper` performs verified add-before-retire rotation when both old and new wrappers remain in TOML. The age private identity is never accepted in runtime configuration. See [Encryption key recovery](/self-hosting/key-recovery) for the explicit, owner-authorized recovery procedure.
 
 ### SPIFFE authentication modes
 

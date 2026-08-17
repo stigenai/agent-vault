@@ -23,6 +23,8 @@ func CountSourceTables(src *SQLStore) ([]TableCount, error) {
 	tables := []string{
 		"instance_settings",
 		"master_key",
+		"dek_wrappings",
+		"key_recovery_events",
 		"vaults",
 		"vault_settings",
 		"users",
@@ -118,6 +120,8 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 	}{
 		{"instance_settings", copyInstanceSettings},
 		{"master_key", copyMasterKey},
+		{"dek_wrappings", copyDEKWrappings},
+		{"key_recovery_events", copyKeyRecoveryEvents},
 		{"vaults", copyVaults},
 		{"vault_settings", copyVaultSettings},
 		{"users", copyUsers},
@@ -1051,6 +1055,80 @@ func copyDynamicSecretLeases(ctx context.Context, src *SQLStore, tx *sql.Tx, dst
 			leaseID, vaultID, dsName, projectID, env, secretPath, ea, ca,
 		)
 		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyDEKWrappings(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT id, master_key_id, provider, key_id, key_version,
+		wrapped_dek, status, verified_at, created_at, retired_at FROM dek_wrappings`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var id, provider, keyID, keyVersion, status string
+		var masterKeyID int
+		var wrappedDEK []byte
+		var verifiedAt, createdAt, retiredAt any
+		if err := rows.Scan(&id, &masterKeyID, &provider, &keyID, &keyVersion, &wrappedDEK,
+			&status, &verifiedAt, &createdAt, &retiredAt); err != nil {
+			return n, err
+		}
+		va, err := convertTime(verifiedAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		ca, err := convertTime(createdAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		ra, err := convertTime(retiredAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO dek_wrappings
+			(id, master_key_id, provider, key_id, key_version, wrapped_dek, status, verified_at, created_at, retired_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), id, masterKeyID, provider, keyID, keyVersion,
+			wrappedDEK, status, va, ca, ra); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyKeyRecoveryEvents(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT id, actor_id, actor_spiffe_id, recovery_wrapping_id,
+		recovery_provider, recovery_key_id, new_primary_wrapping_id, new_primary_provider,
+		new_primary_key_id, new_primary_key_version, created_at FROM key_recovery_events`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var event KeyRecoveryEvent
+		var createdAt any
+		if err := rows.Scan(&event.ID, &event.ActorID, &event.ActorSPIFFEID, &event.RecoveryWrappingID,
+			&event.RecoveryProvider, &event.RecoveryKeyID, &event.NewPrimaryWrappingID,
+			&event.NewPrimaryProvider, &event.NewPrimaryKeyID, &event.NewPrimaryKeyVersion, &createdAt); err != nil {
+			return n, err
+		}
+		ca, err := convertTime(createdAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO key_recovery_events
+			(id, actor_id, actor_spiffe_id, recovery_wrapping_id, recovery_provider, recovery_key_id,
+			 new_primary_wrapping_id, new_primary_provider, new_primary_key_id, new_primary_key_version, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), event.ID, event.ActorID, event.ActorSPIFFEID,
+			event.RecoveryWrappingID, event.RecoveryProvider, event.RecoveryKeyID, event.NewPrimaryWrappingID,
+			event.NewPrimaryProvider, event.NewPrimaryKeyID, event.NewPrimaryKeyVersion, ca); err != nil {
 			return n, err
 		}
 		n++

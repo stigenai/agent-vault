@@ -110,3 +110,42 @@ func TestConcurrentReplicasConvergeOnOnePrimary(t *testing.T) {
 		t.Fatal("unexpected verification timestamp")
 	}
 }
+
+func TestRecoveryAuditFailureRollsBackPromotion(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "audit-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	dek := bytes.Repeat([]byte{9}, 32)
+	if err := db.SetMasterKeyRecord(ctx, &store.MasterKeyRecord{
+		Sentinel: []byte("s"), SentinelNonce: []byte("n"), DEKPlaintext: append([]byte(nil), dek...),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := EnsureInstanceBinding(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldWrapper := fakeWrapper{identity: Identity{Provider: "test-kms", KeyID: "old"}}
+	oldPrimary, err := EnsurePrimary(ctx, db, oldWrapper, dek, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newWrapper := fakeWrapper{identity: Identity{Provider: "test-kms", KeyID: "new"}}
+	_, err = EnsureRecoveryPrimary(ctx, db, newWrapper, dek, binding, store.KeyRecoveryEvent{
+		ActorID: "owner", ActorSPIFFEID: "spiffe://example/owner", RecoveryWrappingID: "missing",
+	})
+	if err == nil {
+		t.Fatal("promotion succeeded without a recovery audit source")
+	}
+	primary, err := db.GetPrimaryDEKWrapping(ctx)
+	if err != nil || primary.ID != oldPrimary.ID {
+		t.Fatalf("unaudited promotion was not rolled back: %#v, %v", primary, err)
+	}
+	events, err := db.ListKeyRecoveryEvents(ctx, 10)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("unexpected recovery events = %#v, %v", events, err)
+	}
+}
