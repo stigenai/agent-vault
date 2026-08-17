@@ -115,6 +115,7 @@ type KeyWrapperConfig struct {
 	Kind    string                `toml:"kind"`
 	AWSKMS  *AWSKMSWrapperConfig  `toml:"aws_kms"`
 	OpenBao *OpenBaoWrapperConfig `toml:"openbao"`
+	Age     *AgeWrapperConfig     `toml:"age"`
 }
 
 type AWSKMSWrapperConfig struct {
@@ -128,6 +129,10 @@ type OpenBaoWrapperConfig struct {
 	KeyName   string `toml:"key_name"`
 	AuthMount string `toml:"auth_mount"`
 	Role      string `toml:"role"`
+}
+
+type AgeWrapperConfig struct {
+	Recipient string `toml:"recipient"`
 }
 
 type SMTP struct {
@@ -429,6 +434,13 @@ func validateKeyWrappers(encryption Encryption) error {
 		case "openbao-transit":
 			if wrapper.OpenBao == nil || strings.TrimSpace(wrapper.OpenBao.Address) == "" || strings.TrimSpace(wrapper.OpenBao.KeyName) == "" || strings.TrimSpace(wrapper.OpenBao.Role) == "" {
 				return fmt.Errorf("encryption.wrappers[%d].openbao: address, key_name, and role are required", i)
+			}
+		case "age-x25519":
+			if wrapper.Age == nil || !strings.HasPrefix(strings.TrimSpace(wrapper.Age.Recipient), "age1") {
+				return fmt.Errorf("encryption.wrappers[%d].age: public X25519 recipient is required", i)
+			}
+			if encryption.PrimaryWrapper == wrapper.Name {
+				return fmt.Errorf("encryption.primary_wrapper: age-x25519 is recovery-only")
 			}
 		default:
 			return fmt.Errorf("encryption.wrappers[%d].kind: unsupported %q", i, wrapper.Kind)

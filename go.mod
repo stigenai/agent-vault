@@ -3,6 +3,7 @@ module github.com/Infisical/agent-vault
 go 1.25.0
 
 require (
+	filippo.io/age v1.2.1
 	github.com/aws/aws-sdk-go-v2 v1.27.2
 	github.com/aws/aws-sdk-go-v2/config v1.27.18
 	github.com/aws/aws-sdk-go-v2/service/kms v1.30.1

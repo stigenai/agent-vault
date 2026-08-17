@@ -63,3 +63,41 @@ role = "agent-vault"
 		t.Fatalf("OpenBao config = %#v", bao)
 	}
 }
+
+func TestAgeRecoveryTOMLHasNoPrivateIdentityField(t *testing.T) {
+	path := writeConfig(t, "age.toml", `schema_version = 1
+[encryption]
+primary_wrapper = "primary"
+[[encryption.wrappers]]
+name = "primary"
+kind = "aws-kms"
+[encryption.wrappers.aws_kms]
+key_arn = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"
+region = "us-east-1"
+[[encryption.wrappers]]
+name = "recovery"
+kind = "age-x25519"
+[encryption.wrappers.age]
+recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+`)
+	result, err := Load(Options{Path: path, LookupEnv: emptyEnv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Config.Encryption.Wrappers[1].Age == nil {
+		t.Fatal("age recipient was not loaded")
+	}
+	privatePath := writeConfig(t, "age-private.toml", `schema_version = 1
+[encryption]
+primary_wrapper = "recovery"
+[[encryption.wrappers]]
+name = "recovery"
+kind = "age-x25519"
+[encryption.wrappers.age]
+recipient = "age1public"
+identity = "AGE-SECRET-KEY-DO-NOT-LOAD"
+`)
+	if _, err := Load(Options{Path: privatePath, LookupEnv: emptyEnv}); err == nil {
+		t.Fatal("private age identity was accepted in runtime TOML")
+	}
+}
