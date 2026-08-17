@@ -23,6 +23,13 @@ type SecretsFetcher interface {
 	AuthMethod() AuthMethod
 }
 
+// SecretRetriever is the narrow per-credential surface used by the common
+// provider framework. It avoids loading unrelated secret values into memory.
+type SecretRetriever interface {
+	FetchSecret(ctx context.Context, cfg VaultConfig, key string) (Secret, error)
+	AuthMethod() AuthMethod
+}
+
 // DynamicSecretInfo names a dynamic-secret config discovered at a vault's path.
 // Its fields are unknown until a lease is minted.
 type DynamicSecretInfo struct {
@@ -135,9 +142,25 @@ func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, e
 		}
 		out := make([]Secret, len(res.Secrets))
 		for i, s := range res.Secrets {
-			out[i] = Secret{Key: s.SecretKey, Value: s.SecretValue}
+			out[i] = Secret{ID: s.ID, Key: s.SecretKey, Value: s.SecretValue, Version: s.Version}
 		}
 		return out, nil
+	})
+}
+
+func (c *Client) FetchSecret(ctx context.Context, cfg VaultConfig, key string) (Secret, error) {
+	return runSDK(ctx, func() (Secret, error) {
+		secret, err := c.sdk.Secrets().Retrieve(sdk.RetrieveSecretOptions{
+			SecretKey:              key,
+			ProjectID:              cfg.ProjectID,
+			Environment:            cfg.Environment,
+			SecretPath:             cfg.SecretPath,
+			ExpandSecretReferences: true,
+		})
+		if err != nil {
+			return Secret{}, err
+		}
+		return Secret{ID: secret.ID, Key: secret.SecretKey, Value: secret.SecretValue, Version: secret.Version}, nil
 	})
 }
 

@@ -62,6 +62,8 @@ func ParseConfigJSON(raw string) (VaultConfig, error) {
 
 // Secret is the broker-facing key/value pair pulled from Infisical.
 type Secret struct {
-	Key   string
-	Value string
+	ID      string
+	Key     string
+	Value   string
+	Version int
 }
