@@ -118,6 +118,33 @@ type MasterKeyRecord struct {
 	CreatedAt     time.Time
 }
 
+const (
+	DEKWrappingPrimary = "primary"
+	DEKWrappingActive  = "active"
+	DEKWrappingRetired = "retired"
+)
+
+// DEKWrappingRecord stores ciphertext plus deliberately narrow public provider
+// identity. Provider credentials and plaintext DEKs have no representation in
+// this record.
+type DEKWrappingRecord struct {
+	ID         string
+	Provider   string
+	KeyID      string
+	KeyVersion string
+	WrappedDEK []byte
+	Status     string
+	VerifiedAt time.Time
+	CreatedAt  time.Time
+	RetiredAt  *time.Time
+}
+
+type DEKWrappingStore interface {
+	InsertDEKWrapping(ctx context.Context, record *DEKWrappingRecord) error
+	ListDEKWrappings(ctx context.Context, includeRetired bool) ([]DEKWrappingRecord, error)
+	GetPrimaryDEKWrapping(ctx context.Context) (*DEKWrappingRecord, error)
+}
+
 // Session represents an authenticated session.
 // User sessions: VaultID may be set (scoped) or empty (global login).
 // Agent tokens: VaultID is empty; vault resolved per-request via X-Vault header.

@@ -1023,6 +1023,66 @@ func TestMasterKeyRecordSingleton(t *testing.T) {
 	}
 }
 
+func TestMultipleDEKWrappingsCoexistWithLegacyRecord(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	legacy := &MasterKeyRecord{
+		Sentinel:      []byte("legacy-sentinel"),
+		SentinelNonce: []byte("legacy-nonce"),
+		DEKCiphertext: []byte("legacy-password-wrapped-dek"),
+		DEKNonce:      []byte("legacy-dek-nonce"),
+	}
+	if err := s.SetMasterKeyRecord(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, record := range []*DEKWrappingRecord{
+		{Provider: "aws-kms", KeyID: "arn:aws:kms:us-east-1:123:key/one", KeyVersion: "1", WrappedDEK: []byte("kms-ciphertext"), Status: DEKWrappingPrimary, VerifiedAt: now},
+		{Provider: "openbao-transit", KeyID: "transit/keys/agent-vault", KeyVersion: "2", WrappedDEK: []byte("vault:v2:ciphertext"), Status: DEKWrappingActive, VerifiedAt: now},
+	} {
+		if err := s.InsertDEKWrapping(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrappings, err := s.ListDEKWrappings(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrappings) != 2 || wrappings[0].Status != DEKWrappingPrimary || wrappings[1].Provider != "openbao-transit" {
+		t.Fatalf("wrappings = %#v", wrappings)
+	}
+	primary, err := s.GetPrimaryDEKWrapping(ctx)
+	if err != nil || primary.Provider != "aws-kms" {
+		t.Fatalf("primary = %#v, %v", primary, err)
+	}
+	gotLegacy, err := s.GetMasterKeyRecord(ctx)
+	if err != nil || string(gotLegacy.DEKCiphertext) != string(legacy.DEKCiphertext) {
+		t.Fatalf("legacy compatibility record changed: %#v, %v", gotLegacy, err)
+	}
+	if err := s.InsertDEKWrapping(ctx, &DEKWrappingRecord{
+		Provider: "age-x25519", KeyID: "age1recovery", WrappedDEK: []byte("recovery-ciphertext"), Status: DEKWrappingPrimary, VerifiedAt: now,
+	}); err == nil {
+		t.Fatal("second primary wrapping was accepted")
+	}
+}
+
+func TestDEKWrappingRequiresVerifiedCiphertext(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	if err := s.SetMasterKeyRecord(ctx, &MasterKeyRecord{Sentinel: []byte("s"), SentinelNonce: []byte("n"), DEKPlaintext: []byte("legacy")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range []*DEKWrappingRecord{
+		{Provider: "aws-kms", KeyID: "key", Status: DEKWrappingActive, VerifiedAt: time.Now()},
+		{Provider: "aws-kms", KeyID: "key", WrappedDEK: []byte("ciphertext"), Status: DEKWrappingActive},
+		{Provider: "aws-kms", KeyID: "key", WrappedDEK: []byte("ciphertext"), Status: "unknown", VerifiedAt: time.Now()},
+	} {
+		if err := s.InsertDEKWrapping(ctx, record); err == nil {
+			t.Fatalf("invalid wrapping persisted: %#v", record)
+		}
+	}
+}
+
 // --- Broker Config ---
 
 func TestBrokerConfigCRUD(t *testing.T) {

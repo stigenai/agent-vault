@@ -1768,6 +1768,79 @@ func (s *SQLStore) UpdateMasterKeyRecord(ctx context.Context, record *MasterKeyR
 	return nil
 }
 
+func (s *SQLStore) InsertDEKWrapping(ctx context.Context, record *DEKWrappingRecord) error {
+	if record == nil || record.Provider == "" || record.KeyID == "" || len(record.WrappedDEK) == 0 {
+		return fmt.Errorf("invalid DEK wrapping record")
+	}
+	if record.Status != DEKWrappingPrimary && record.Status != DEKWrappingActive && record.Status != DEKWrappingRetired {
+		return fmt.Errorf("invalid DEK wrapping status")
+	}
+	if record.ID == "" {
+		record.ID = newUUID()
+	}
+	if record.VerifiedAt.IsZero() {
+		return fmt.Errorf("DEK wrapping must be verified before persistence")
+	}
+	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO dek_wrappings
+(id, master_key_id, provider, key_id, key_version, wrapped_dek, status, verified_at, retired_at)
+VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`),
+		record.ID, record.Provider, record.KeyID, record.KeyVersion, append([]byte(nil), record.WrappedDEK...),
+		record.Status, s.dialect.FormatTime(record.VerifiedAt), s.dialect.FormatNullableTime(record.RetiredAt),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting DEK wrapping: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLStore) ListDEKWrappings(ctx context.Context, includeRetired bool) ([]DEKWrappingRecord, error) {
+	query := `SELECT id, provider, key_id, key_version, wrapped_dek, status, verified_at, created_at, retired_at
+FROM dek_wrappings`
+	if !includeRetired {
+		query += ` WHERE status <> 'retired'`
+	}
+	query += ` ORDER BY CASE status WHEN 'primary' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, created_at, id`
+	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(query))
+	if err != nil {
+		return nil, fmt.Errorf("listing DEK wrappings: %w", err)
+	}
+	defer rows.Close()
+	var result []DEKWrappingRecord
+	for rows.Next() {
+		var record DEKWrappingRecord
+		var verifiedAt, createdAt, retiredAt interface{}
+		if err := rows.Scan(&record.ID, &record.Provider, &record.KeyID, &record.KeyVersion, &record.WrappedDEK,
+			&record.Status, &verifiedAt, &createdAt, &retiredAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping: %w", err)
+		}
+		if record.VerifiedAt, err = s.dialect.ScanTime(verifiedAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping verified time: %w", err)
+		}
+		if record.CreatedAt, err = s.dialect.ScanTime(createdAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping created time: %w", err)
+		}
+		if record.RetiredAt, err = s.dialect.ScanNullableTime(retiredAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping retired time: %w", err)
+		}
+		result = append(result, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing DEK wrappings: %w", err)
+	}
+	return result, nil
+}
+
+func (s *SQLStore) GetPrimaryDEKWrapping(ctx context.Context) (*DEKWrappingRecord, error) {
+	rows, err := s.ListDEKWrappings(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 || rows[0].Status != DEKWrappingPrimary {
+		return nil, sql.ErrNoRows
+	}
+	return &rows[0], nil
+}
+
 // --- Broker Configs ---
 
 func (s *SQLStore) SetBrokerConfig(ctx context.Context, vaultID string, servicesJSON string) (*BrokerConfig, error) {
