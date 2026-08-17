@@ -93,6 +93,18 @@ func closeWorkloadIdentityClient() {
 	}
 }
 
+func activeWorkloadIdentitySource() (*workloadidentity.Source, error) {
+	if _, err := ensureWorkloadIdentitySession(); err != nil {
+		return nil, err
+	}
+	cliWorkloadIdentity.Lock()
+	defer cliWorkloadIdentity.Unlock()
+	if cliWorkloadIdentity.source == nil {
+		return nil, fmt.Errorf("CLI workload identity source is unavailable")
+	}
+	return cliWorkloadIdentity.source, nil
+}
+
 func workloadIdentityAddress() (string, bool, error) {
 	sess, err := loadWorkloadIdentitySession()
 	if err != nil {

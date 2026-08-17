@@ -97,6 +97,11 @@ type Client struct {
 	TrustDomains []string
 }
 
+type Relay struct {
+	ListenAddress string
+	RemoteAddress string
+}
+
 // Encryption contains compatibility key material until provider-backed DEK
 // wrapping replaces the legacy master password.
 type Encryption struct {
@@ -138,6 +143,7 @@ type Partial struct {
 	Proxy         PartialProxy      `toml:"proxy"`
 	Auth          PartialAuth       `toml:"auth"`
 	Client        PartialClient     `toml:"client"`
+	Relay         PartialRelay      `toml:"relay"`
 	Encryption    PartialEncryption `toml:"encryption"`
 	SMTP          PartialSMTP       `toml:"smtp"`
 	Logs          PartialLogs       `toml:"logs"`
@@ -182,6 +188,11 @@ type PartialClient struct {
 	Vault        *string   `toml:"vault"`
 	WorkloadAPI  *string   `toml:"workload_api"`
 	TrustDomains *[]string `toml:"trust_domains"`
+}
+
+type PartialRelay struct {
+	ListenAddress *string `toml:"listen_address"`
+	RemoteAddress *string `toml:"remote_address"`
 }
 
 type PartialEncryption struct {
