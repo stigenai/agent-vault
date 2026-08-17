@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
@@ -71,6 +72,14 @@ func TestSourceReadinessIdentityAndRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	serverTLS, err := source.ServerTLSConfig(tlsconfig.AuthorizeAny())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstServerTLS, err := serverTLS.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	fake.rotate(second)
 	select {
@@ -84,6 +93,13 @@ func TestSourceReadinessIdentityAndRotation(t *testing.T) {
 	}
 	if string(firstTLS.Certificate[0]) == string(secondTLS.Certificate[0]) {
 		t.Fatal("TLS callback retained stale SVID after rotation")
+	}
+	secondServerTLS, err := serverTLS.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstServerTLS.Certificate[0]) == string(secondServerTLS.Certificate[0]) {
+		t.Fatal("live server TLS callback retained stale SVID after rotation")
 	}
 	if id, err := source.ID(); err != nil || id.String() != second.ID.String() {
 		t.Fatalf("rotated ID = %v, %v", id, err)

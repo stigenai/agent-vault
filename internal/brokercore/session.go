@@ -45,6 +45,12 @@ type SessionResolver interface {
 	ResolveForProxy(ctx context.Context, token, vaultHint string) (*ProxyScope, error)
 }
 
+// AgentResolver resolves a cryptographically authenticated agent actor into a
+// proxy vault scope. The caller must validate the transport identity first.
+type AgentResolver interface {
+	ResolveAgentForProxy(ctx context.Context, agentID, vaultHint string) (*ProxyScope, error)
+}
+
 // SessionStore is the minimal store surface used by StoreSessionResolver.
 // Kept narrow so tests can supply fakes without stubbing the full store.
 type SessionStore interface {
@@ -67,6 +73,15 @@ type StoreSessionResolver struct {
 // to match existing server construction patterns.
 func NewStoreSessionResolver(s SessionStore) *StoreSessionResolver {
 	return &StoreSessionResolver{Store: s, Now: time.Now}
+}
+
+// ResolveAgentForProxy resolves an already authenticated agent without a
+// bearer token. This is used by SPIFFE mTLS proxy ingress.
+func (r *StoreSessionResolver) ResolveAgentForProxy(ctx context.Context, agentID, vaultHint string) (*ProxyScope, error) {
+	if agentID == "" {
+		return nil, ErrInvalidSession
+	}
+	return r.resolveAgentVault(ctx, agentID, vaultHint)
 }
 
 // ResolveForProxy validates token, applies the vault hint, and returns a
@@ -112,24 +127,28 @@ func (r *StoreSessionResolver) ResolveForProxy(ctx context.Context, token, vault
 		return nil, ErrNoVaultContext
 	}
 
+	return r.resolveAgentVault(ctx, sess.AgentID, vaultHint)
+}
+
+func (r *StoreSessionResolver) resolveAgentVault(ctx context.Context, agentID, vaultHint string) (*ProxyScope, error) {
 	if vaultHint != "" {
 		v, err := r.Store.GetVault(ctx, vaultHint)
 		if err != nil || v == nil {
 			return nil, ErrVaultNotFound
 		}
-		role, err := r.Store.GetVaultRole(ctx, sess.AgentID, v.ID)
+		role, err := r.Store.GetVaultRole(ctx, agentID, v.ID)
 		if err != nil || role == "" {
 			return nil, ErrVaultAccessDenied
 		}
 		return &ProxyScope{
-			AgentID:   sess.AgentID,
+			AgentID:   agentID,
 			VaultID:   v.ID,
 			VaultName: v.Name,
 			VaultRole: role,
 		}, nil
 	}
 
-	grants, err := r.Store.ListActorGrants(ctx, sess.AgentID)
+	grants, err := r.Store.ListActorGrants(ctx, agentID)
 	if err != nil {
 		return nil, ErrNoVaultContext
 	}
@@ -139,7 +158,7 @@ func (r *StoreSessionResolver) ResolveForProxy(ctx context.Context, token, vault
 	case 1:
 		g := grants[0]
 		return &ProxyScope{
-			AgentID:   sess.AgentID,
+			AgentID:   agentID,
 			VaultID:   g.VaultID,
 			VaultName: g.VaultName,
 			VaultRole: g.Role,

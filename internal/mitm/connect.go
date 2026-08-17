@@ -71,16 +71,11 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authenticate the CONNECT request via Proxy-Authorization and resolve
-	// the target vault. All error responses must be written BEFORE the
+	// Authenticate the CONNECT request via SPIFFE mTLS or the legacy
+	// Proxy-Authorization token and resolve the target vault. All error
+	// responses must be written BEFORE the
 	// connection is hijacked — once hijacked, no HTTP status can be sent.
-	token, hint, err := brokercore.ParseProxyAuth(r)
-	if err != nil {
-		p.recordAuthFailure(r)
-		writeProxyAuthChallenge(w, "Proxy-Authorization required")
-		return
-	}
-	scope, err := p.sessions.ResolveForProxy(r.Context(), token, hint)
+	scope, err := p.authenticateRequest(r)
 	if err != nil {
 		p.recordAuthFailure(r)
 		writeAuthError(w, err)

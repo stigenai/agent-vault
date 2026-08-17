@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"embed"
 	"errors"
@@ -31,6 +32,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/requestlog"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
+	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
 //go:embed all:webdist
@@ -60,6 +62,7 @@ type agentVaultJSON struct {
 // Server is the Agent Vault HTTP server.
 type Server struct {
 	httpServer        *http.Server
+	tlsConfig         *tls.Config
 	store             Store
 	encKey            []byte // 32-byte encryption key, held in memory while running
 	notifier          *notify.Notifier
@@ -774,6 +777,9 @@ type RuntimeOptions struct {
 	AllowPrivateRanges bool
 	NetworkAllowlist   []net.IPNet
 	TrustedProxies     []net.IPNet
+	// TLSConfig enables TLS on the API listener. SPIFFE deployments supply a
+	// rotating mTLS config from workloadidentity.Source.
+	TLSConfig *tls.Config
 }
 
 func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
@@ -812,6 +818,7 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 		rateLimitBase:     opts.RateLimit,
 		rateLimitEnvMasks: opts.RateLimitEnvMasks,
 		trustedProxyCIDRs: append([]net.IPNet(nil), opts.TrustedProxies...),
+		tlsConfig:         opts.TLSConfig,
 		logSink:           requestlog.Nop{},
 		oauthRefresher:    oauth.NewRefresher(),
 	}
@@ -1072,7 +1079,7 @@ func (s *Server) Start() error {
 		if !s.initialized {
 			fmt.Printf("Run `agent-vault auth register` or visit %s to create the owner account\n", s.baseURL)
 		}
-		if err := s.httpServer.Serve(httpLn); err != nil && err != http.ErrServerClosed {
+		if err := s.serve(httpLn); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
@@ -1141,6 +1148,15 @@ func (s *Server) Start() error {
 	fmt.Println("server shut down gracefully")
 	crypto.WipeBytes(s.encKey)
 	return nil
+}
+
+// serve runs the API server on listener, applying the configured rotating TLS
+// callbacks when workload identity is enabled.
+func (s *Server) serve(listener net.Listener) error {
+	if s.tlsConfig != nil {
+		listener = tls.NewListener(listener, s.tlsConfig)
+	}
+	return s.httpServer.Serve(listener)
 }
 
 var errTooManyPendingCodes = errors.New("too many pending verification codes")
@@ -1254,6 +1270,20 @@ var (
 // The authenticated session is stored in the request context.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A presented client certificate is authoritative: if it cannot be
+		// mapped to a current active agent, never downgrade to a bearer token.
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			agent, err := workloadidentity.AgentFromTLS(r.Context(), r.TLS, s.store)
+			if err != nil {
+				jsonError(w, http.StatusUnauthorized, "Invalid SPIFFE identity")
+				return
+			}
+			sess := &store.Session{AgentID: agent.ID, CreatedAt: time.Now().UTC()}
+			ctx := context.WithValue(r.Context(), sessionContextKey, sess)
+			next(w, r.WithContext(ctx))
+			return
+		}
+
 		var token string
 		header := r.Header.Get("Authorization")
 		if strings.HasPrefix(header, "Bearer ") {
