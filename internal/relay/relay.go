@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const DefaultRequestLineLimit = 8 * 1024
@@ -29,12 +30,14 @@ type Options struct {
 	RemoteAddr       string
 	DialContext      DialContextFunc
 	RequestLineLimit int
+	ConnectTimeout   time.Duration
 }
 
 type Relay struct {
-	remoteAddr string
-	dial       DialContextFunc
-	lineLimit  int
+	remoteAddr     string
+	dial           DialContextFunc
+	lineLimit      int
+	connectTimeout time.Duration
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -62,14 +65,22 @@ func New(opts Options) (*Relay, error) {
 	if lineLimit < 64 {
 		return nil, errors.New("relay request-line limit must be at least 64 bytes")
 	}
+	connectTimeout := opts.ConnectTimeout
+	if connectTimeout == 0 {
+		connectTimeout = 10 * time.Second
+	}
+	if connectTimeout < 0 {
+		return nil, errors.New("relay connect timeout must not be negative")
+	}
 	dialCtx, cancel := context.WithCancel(context.Background())
 	return &Relay{
-		remoteAddr: opts.RemoteAddr,
-		dial:       dial,
-		lineLimit:  lineLimit,
-		conns:      make(map[net.Conn]struct{}),
-		dialCtx:    dialCtx,
-		cancel:     cancel,
+		remoteAddr:     opts.RemoteAddr,
+		dial:           dial,
+		lineLimit:      lineLimit,
+		connectTimeout: connectTimeout,
+		conns:          make(map[net.Conn]struct{}),
+		dialCtx:        dialCtx,
+		cancel:         cancel,
 	}, nil
 }
 
@@ -163,7 +174,9 @@ func (r *Relay) serveConn(local net.Conn) {
 		return
 	}
 
-	remote, err := r.dial(r.dialCtx, "tcp", r.remoteAddr)
+	dialCtx, cancelDial := context.WithTimeout(r.dialCtx, r.connectTimeout)
+	remote, err := r.dial(dialCtx, "tcp", r.remoteAddr)
+	cancelDial()
 	if err != nil {
 		writeError(local, 502, "central proxy unavailable")
 		return

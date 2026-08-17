@@ -156,6 +156,7 @@ type relayMaterial struct {
 	mu     sync.RWMutex
 	svid   *x509svid.SVID
 	bundle *x509bundle.Bundle
+	err    error
 }
 
 type relayAgentLookup struct {
@@ -173,16 +174,28 @@ func (l relayAgentLookup) GetAgentBySPIFFEID(_ context.Context, id string) (*sto
 func (m *relayMaterial) GetX509SVID() (*x509svid.SVID, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.err != nil {
+		return nil, m.err
+	}
 	return m.svid, nil
 }
 
 func (m *relayMaterial) GetX509BundleForTrustDomain(domain spiffeid.TrustDomain) (*x509bundle.Bundle, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.err != nil {
+		return nil, m.err
+	}
 	if m.bundle == nil || m.bundle.TrustDomain() != domain {
 		return nil, fmt.Errorf("bundle not found")
 	}
 	return m.bundle, nil
+}
+
+func (m *relayMaterial) setError(err error) {
+	m.mu.Lock()
+	m.err = err
+	m.mu.Unlock()
 }
 
 func (m *relayMaterial) rotate(svid *x509svid.SVID) {
