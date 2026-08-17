@@ -436,6 +436,12 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 		result.Config.Encryption.LegacyMasterPassword = value
 		set("encryption.legacy_master_password")
 	}
+	if v := partial.Encryption.PrimaryWrapper; v != nil {
+		result.Config.Encryption.PrimaryWrapper = *v
+	}
+	if v := partial.Encryption.Wrappers; v != nil {
+		result.Config.Encryption.Wrappers = append([]KeyWrapperConfig(nil), (*v)...)
+	}
 	if v := partial.SMTP.Host; v != nil {
 		result.Config.SMTP.Host = *v
 		set("smtp.host")

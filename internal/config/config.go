@@ -106,6 +106,19 @@ type Relay struct {
 // wrapping replaces the legacy master password.
 type Encryption struct {
 	LegacyMasterPassword SecretValue
+	PrimaryWrapper       string
+	Wrappers             []KeyWrapperConfig
+}
+
+type KeyWrapperConfig struct {
+	Name   string               `toml:"name"`
+	Kind   string               `toml:"kind"`
+	AWSKMS *AWSKMSWrapperConfig `toml:"aws_kms"`
+}
+
+type AWSKMSWrapperConfig struct {
+	KeyARN string `toml:"key_arn"`
+	Region string `toml:"region"`
 }
 
 type SMTP struct {
@@ -196,7 +209,9 @@ type PartialRelay struct {
 }
 
 type PartialEncryption struct {
-	LegacyMasterPassword *SecretRef `toml:"legacy_master_password"`
+	LegacyMasterPassword *SecretRef          `toml:"legacy_master_password"`
+	PrimaryWrapper       *string             `toml:"primary_wrapper"`
+	Wrappers             *[]KeyWrapperConfig `toml:"wrappers"`
 }
 
 type PartialSMTP struct {
@@ -342,6 +357,9 @@ func (c Runtime) Validate() error {
 	if err := validateAuth(c.Auth); err != nil {
 		return err
 	}
+	if err := validateKeyWrappers(c.Encryption); err != nil {
+		return err
+	}
 	if c.Auth.Mode != "legacy" && !strings.HasPrefix(strings.ToLower(c.Server.ExternalAddress), "https://") {
 		return fmt.Errorf("server.external_address: HTTPS URL is required for SPIFFE authentication")
 	}
@@ -374,6 +392,37 @@ func (c Runtime) Validate() error {
 	case "default", "strict", "loose", "off":
 	default:
 		return fmt.Errorf("rate_limit.profile: must be default, strict, loose, or off")
+	}
+	return nil
+}
+
+func validateKeyWrappers(encryption Encryption) error {
+	if len(encryption.Wrappers) == 0 {
+		if encryption.PrimaryWrapper != "" {
+			return fmt.Errorf("encryption.primary_wrapper: configured without wrappers")
+		}
+		return nil
+	}
+	seen := make(map[string]struct{}, len(encryption.Wrappers))
+	for i, wrapper := range encryption.Wrappers {
+		if strings.TrimSpace(wrapper.Name) == "" {
+			return fmt.Errorf("encryption.wrappers[%d].name: required", i)
+		}
+		if _, ok := seen[wrapper.Name]; ok {
+			return fmt.Errorf("encryption.wrappers[%d].name: duplicate %q", i, wrapper.Name)
+		}
+		seen[wrapper.Name] = struct{}{}
+		switch wrapper.Kind {
+		case "aws-kms":
+			if wrapper.AWSKMS == nil || strings.TrimSpace(wrapper.AWSKMS.KeyARN) == "" || strings.TrimSpace(wrapper.AWSKMS.Region) == "" {
+				return fmt.Errorf("encryption.wrappers[%d].aws_kms: key_arn and region are required", i)
+			}
+		default:
+			return fmt.Errorf("encryption.wrappers[%d].kind: unsupported %q", i, wrapper.Kind)
+		}
+	}
+	if _, ok := seen[encryption.PrimaryWrapper]; !ok {
+		return fmt.Errorf("encryption.primary_wrapper: must name a configured wrapper")
 	}
 	return nil
 }
