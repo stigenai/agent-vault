@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-vault-reconciler
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agent-vault-reconciler
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: agent-vault-reconciler
+          restartPolicy: Never
+          containers:
+            - name: reconcile
+              image: ghcr.io/stigenai/agent-vault:latest
+              args:
+                - config
+                - apply
+                - --yes
+                - --file
+                - /etc/agent-vault/desired/base.toml
+                - --file
+                - /etc/agent-vault/desired/environment.toml
+              env:
+                - name: AGENT_VAULT_CONFIG
+                  value: /etc/agent-vault/server.toml
+              volumeMounts:
+                - name: runtime-config
+                  mountPath: /etc/agent-vault/server.toml
+                  subPath: server.toml
+                  readOnly: true
+                - name: desired-state
+                  mountPath: /etc/agent-vault/desired
+                  readOnly: true
+                - name: spire-agent-socket
+                  mountPath: /run/spire/sockets
+                  readOnly: true
+          volumes:
+            - name: runtime-config
+              configMap:
+                name: agent-vault-config
+            - name: desired-state
+              configMap:
+                name: agent-vault-fleet-desired
+            - name: spire-agent-socket
+              hostPath:
+                path: /run/spire/sockets
+                type: Directory

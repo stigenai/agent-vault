@@ -1040,6 +1040,45 @@ description: "Complete reference for all Agent Vault CLI commands."
   </Accordion>
 </AccordionGroup>
 
+## Fleet configuration
+
+Owner-authorized fleet commands use a login session or the in-cluster CLI's rotating SPIFFE identity. See [Fleet reconciliation with SPIFFE](/guides/fleet-reconciliation) for the TOML schema, GitOps workflow, and rollback guidance.
+
+<AccordionGroup>
+  <Accordion title="agent-vault config plan">
+    ```bash
+    agent-vault config plan -f <fleet.toml> [-f <overlay.toml>] [flags]
+    ```
+
+    Load and merge desired-state TOML, validate provider references without fetching values, read redacted current state, and print a deterministic JSON plan plus its SHA-256 review digest.
+
+    | Flag | Default | Description |
+    |------|---------|-------------|
+    | `-f`, `--file` | | Fleet TOML file. Required and repeatable. Files merge in lexical path order. |
+    | `--adopt` | `false` | Plan explicit ownership of matching unmanaged resources. |
+    | `--prune` | `false` | Plan deletion of same-manager resources omitted from desired state. |
+    | `--prune-credentials` | `false` | Permit credential identity deletion when prune is also enabled. |
+  </Accordion>
+
+  <Accordion title="agent-vault config apply">
+    ```bash
+    agent-vault config apply -f <fleet.toml> \
+      --plan-sha256 sha256:<reviewed-digest> [flags]
+    ```
+
+    Rebuild and apply the exact reviewed plan. Stale digests and blocked prerequisites return a conflict before mutation. One-time import values are resolved only after approval and never accepted as command arguments.
+
+    | Flag | Default | Description |
+    |------|---------|-------------|
+    | `-f`, `--file` | | Fleet TOML file. Required and repeatable. |
+    | `--plan-sha256` | | Digest emitted by the reviewed `config plan`. |
+    | `-y`, `--yes` | `false` | Print and approve the current plan non-interactively instead of supplying a prior digest. |
+    | `--adopt` | `false` | Apply explicit unmanaged-resource adoption. Must match the reviewed plan option. |
+    | `--prune` | `false` | Delete omitted resources owned by the same manager. |
+    | `--prune-credentials` | `false` | Permit credential identity deletion when prune is also enabled. |
+  </Accordion>
+</AccordionGroup>
+
 ## Master password
 
 Manage the master password that wraps the data encryption key (DEK). All commands require the server to be stopped. When `DATABASE_URL` is set, these commands require `--force` because multiple instances may share the database - stop all instances first.

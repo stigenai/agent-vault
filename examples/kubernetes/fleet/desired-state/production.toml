@@ -1,0 +1,13 @@
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "github-automation"
+
+[[vaults.credentials]]
+name = "GITHUB_TOKEN"
+mode = "reference"
+source = "aws-production"
+ref = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agent-vault/production/github#token"
+refresh_interval = "5m"
+max_staleness = "1h"

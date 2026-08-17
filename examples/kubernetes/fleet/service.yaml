@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-vault
+spec:
+  selector:
+    app: agent-vault
+  ports:
+    - name: api
+      port: 443
+      targetPort: api
+    - name: proxy
+      port: 14322
+      targetPort: proxy
