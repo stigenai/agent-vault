@@ -31,10 +31,11 @@ func TestFleetStateIsOwnerOnlyDeterministicAndRedacted(t *testing.T) {
 	}
 	ms.agents["pr-reviewer"] = &store.Agent{
 		ID: "agent-id", Name: "pr-reviewer", SPIFFEID: "spiffe://cluster.example/ns/agents/sa/pr-reviewer",
-		Role: "no-access", Status: "active", Vaults: []store.VaultGrant{{
-			ActorID: "agent-id", ActorType: "agent", VaultID: "root-ns-id", VaultName: "default", Role: "proxy",
-		}},
+		Role: "no-access", Status: "active",
 	}
+	ms.agentVaultGrants = append(ms.agentVaultGrants, store.VaultGrant{
+		ActorID: "agent-id", ActorType: "agent", VaultID: "root-ns-id", VaultName: "default", Role: "proxy",
+	})
 	serviceKey := store.ManagedResourceKey{Kind: store.ManagedResourceService, ScopeID: "root-ns-id", ResourceID: "github-api"}
 	ms.managedResources[serviceKey] = store.ManagedResource{
 		ManagedResourceKey: serviceKey, Manager: "platform-fleet", Revision: 7,

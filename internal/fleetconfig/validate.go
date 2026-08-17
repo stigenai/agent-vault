@@ -21,6 +21,57 @@ var (
 	envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
+// ValidateManifest validates and canonicalizes a manifest received through a
+// transport other than TOML (for example, the owner-only fleet apply API).
+// Provider references are parsed but secret values are never fetched.
+func ValidateManifest(manifest Manifest, options LoadOptions) (*Manifest, error) {
+	document := rawManifest{
+		SchemaVersion: manifest.SchemaVersion,
+		Manager:       manifest.Manager,
+	}
+	for _, agent := range manifest.Agents {
+		document.Agents = append(document.Agents, rawAgent{
+			Name: agent.Name, SPIFFEID: agent.SPIFFEID, Role: agent.Role,
+		})
+	}
+	for _, vault := range manifest.Vaults {
+		rawVault := rawVault{Name: vault.Name, Grants: append([]Grant(nil), vault.Grants...)}
+		for _, service := range vault.Services {
+			rawService := rawService{
+				Name: service.Name, Host: service.Host, Path: service.Path,
+				Port: service.Port, Enabled: service.Enabled,
+				Auth: rawAuth{
+					Kind: service.Auth.Kind, Credential: service.Auth.Credential,
+					Username: service.Auth.Username, Password: service.Auth.Password,
+					Header: service.Auth.Header, Prefix: service.Auth.Prefix,
+					Headers: service.Auth.Headers,
+				},
+			}
+			for _, substitution := range service.Substitutions {
+				rawService.Substitutions = append(rawService.Substitutions, rawSubstitution{
+					Credential: substitution.Credential, Placeholder: substitution.Placeholder,
+					In: append([]string(nil), substitution.In...),
+				})
+			}
+			rawVault.Services = append(rawVault.Services, rawService)
+		}
+		for _, credential := range vault.Credentials {
+			rawVault.Credentials = append(rawVault.Credentials, rawCredential{
+				Name: credential.Name, Mode: credential.Mode, Source: credential.Source,
+				Reference: credential.Reference, RefreshInterval: credential.RefreshInterval,
+				MaxStaleness: credential.MaxStaleness,
+			})
+		}
+		for _, item := range vault.Imports {
+			rawVault.Imports = append(rawVault.Imports, rawImport{
+				Name: item.Name, From: item.From, Source: item.Source, Reference: item.Reference,
+			})
+		}
+		document.Vaults = append(document.Vaults, rawVault)
+	}
+	return normalizeAndValidate([]rawManifest{document}, options)
+}
+
 func normalizeAndValidate(documents []rawManifest, options LoadOptions) (*Manifest, error) {
 	result := &Manifest{SchemaVersion: SchemaVersion}
 	agents := map[string]Agent{}

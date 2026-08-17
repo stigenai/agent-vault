@@ -38,6 +38,37 @@ func testOptions() LoadOptions {
 	}}}
 }
 
+func TestValidateManifestCanonicalizesTransportInput(t *testing.T) {
+	manifest := Manifest{
+		SchemaVersion: SchemaVersion,
+		Manager:       "platform-fleet",
+		Agents: []Agent{{
+			Name: "worker", SPIFFEID: "spiffe://cluster.example/ns/agents/sa/worker", Role: "no-access",
+		}},
+		Vaults: []Vault{{
+			Name:   "automation",
+			Grants: []Grant{{Agent: "worker", Role: "proxy"}},
+			Credentials: []Credential{{
+				Name: "TOKEN", Mode: "reference", Source: "aws-production",
+				Reference: "application/token", RefreshInterval: "60s", MaxStaleness: "5m",
+				ProviderKind: "client-supplied-kind-is-not-trusted",
+			}},
+		}}}
+	canonical, err := ValidateManifest(manifest, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := canonical.Vaults[0].Credentials[0]
+	if credential.Reference != "canonical/application/token" || credential.ProviderKind != secretprovider.KindAWSSecretsManager {
+		t.Fatalf("credential was not canonicalized: %#v", credential)
+	}
+	if _, err := ValidateManifest(Manifest{SchemaVersion: SchemaVersion, Manager: "platform-fleet", Agents: []Agent{{
+		Name: "bad", SPIFFEID: "not-a-spiffe-id", Role: "no-access",
+	}}}, testOptions()); err == nil {
+		t.Fatal("invalid transport manifest was accepted")
+	}
+}
+
 func writeManifest(t *testing.T, name, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)

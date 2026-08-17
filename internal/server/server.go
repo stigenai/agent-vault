@@ -31,6 +31,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
+	"github.com/Infisical/agent-vault/internal/secretprovider"
 	"github.com/Infisical/agent-vault/internal/secretrefresh"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
@@ -94,6 +95,7 @@ type Server struct {
 	// infisicalSyncer is built in Run; exposed for manual-refresh RefreshOnce.
 	infisicalSyncer *infisical.Syncer
 	secretRefresh   *secretrefresh.Scheduler
+	secretProviders *secretprovider.Registry
 	providerClosers []io.Closer
 	// infisicalDynamic resolves Infisical dynamic-secret leases on demand; built
 	// in Run alongside the syncer when a client is attached. Nil disables it.
@@ -130,6 +132,12 @@ func (s *Server) AttachInfisicalSyncer(syncer *infisical.Syncer) { s.infisicalSy
 // scheduler is attached; legacy source rows are handled by the registry.
 func (s *Server) AttachSecretRefreshScheduler(scheduler *secretrefresh.Scheduler) {
 	s.secretRefresh = scheduler
+}
+
+// AttachSecretProviderRegistry exposes the frozen provider parser registry to
+// owner-only fleet validation and apply paths. It never fetches secret values.
+func (s *Server) AttachSecretProviderRegistry(registry *secretprovider.Registry) {
+	s.secretProviders = registry
 }
 
 func (s *Server) AttachSecretProviderCloser(closer io.Closer) {
@@ -312,6 +320,8 @@ type Store interface {
 	CompareAndSwapManagedResource(ctx context.Context, key store.ManagedResourceKey, manager string, expectedRevision int64) (*store.ManagedResource, error)
 	ReleaseManagedResource(ctx context.Context, key store.ManagedResourceKey, manager string, expectedRevision int64) error
 	ListCredentialSources(ctx context.Context, vaultID string) ([]store.CredentialSource, error)
+	SetCredentialSource(ctx context.Context, source store.CredentialSource) (*store.CredentialSource, error)
+	DeleteCredentialSource(ctx context.Context, vaultID, credentialKey string) error
 
 	GetMasterKeyRecord(ctx context.Context) (*store.MasterKeyRecord, error)
 	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error)
@@ -927,6 +937,8 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("GET /v1/proposals/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleProposalGet))))
 	mux.HandleFunc("GET /v1/proposals", s.requireInitialized(s.requireAuth(actorAuthed(s.handleProposalList))))
 	mux.HandleFunc("GET /v1/fleet/state", s.requireInitialized(s.requireAuth(actorAuthed(s.handleFleetState))))
+	mux.HandleFunc("POST /v1/fleet/provider-reference/validate", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleFleetProviderReferenceValidate)))))
+	mux.HandleFunc("POST /v1/fleet/apply", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleFleetApply)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/approve", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalApprove)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/reject", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalReject)))))
 

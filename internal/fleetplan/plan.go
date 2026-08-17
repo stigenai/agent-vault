@@ -4,6 +4,7 @@ package fleetplan
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -165,6 +166,18 @@ func Build(desired *fleetconfig.Manifest, current fleetstate.State, options Opti
 	protectDestructiveParents(plan)
 	sortOperations(plan.Operations)
 	return plan, nil
+}
+
+// Digest is the stable review/apply guard for a fully built plan.
+func Digest(plan *Plan) (string, error) {
+	if plan == nil {
+		return "", errors.New("plan is required")
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return "", fmt.Errorf("encoding plan: %w", err)
+	}
+	return fleetstate.Digest(encoded), nil
 }
 
 func protectDestructiveParents(plan *Plan) {

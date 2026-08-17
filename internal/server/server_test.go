@@ -30,26 +30,27 @@ var tp = timePtr
 
 // mockStore implements Store for testing.
 type mockStore struct {
-	credentialSources  map[string]*store.CredentialSource
-	managedResources   map[store.ManagedResourceKey]store.ManagedResource
-	masterKeyRecord    *store.MasterKeyRecord
-	sessions           map[string]*store.Session
-	vaults             map[string]*store.Vault
-	credentials        map[string]*store.Credential   // keyed by "vaultID:key"
-	brokerConfigs      map[string]*store.BrokerConfig // keyed by vaultID
-	proposals          map[string][]store.Proposal    // keyed by vaultID
-	users              map[string]*store.User         // keyed by email
-	grants             map[string]map[string]string   // keyed by userID -> vaultID -> role
-	userInvites        map[string]*store.UserInvite   // keyed by token
-	emailVerifications []*store.EmailVerification
-	passwordResets     []*store.PasswordReset
-	agents             map[string]*store.Agent                // keyed by name
-	agentVaultGrants   []store.VaultGrant                     // agent vault grants
-	settings           map[string]string                      // instance settings
-	vaultSettings      map[string]map[string]string           // per-vault: vaultID -> key -> value
-	credStores         map[string]*store.VaultCredentialStore // per-vault external credential store config
-	unmatchedHosts     map[string][]store.UnmatchedHost       // keyed by vaultID
-	sessionCounter     int
+	credentialSources      map[string]*store.CredentialSource
+	setCredentialSourceErr error
+	managedResources       map[store.ManagedResourceKey]store.ManagedResource
+	masterKeyRecord        *store.MasterKeyRecord
+	sessions               map[string]*store.Session
+	vaults                 map[string]*store.Vault
+	credentials            map[string]*store.Credential   // keyed by "vaultID:key"
+	brokerConfigs          map[string]*store.BrokerConfig // keyed by vaultID
+	proposals              map[string][]store.Proposal    // keyed by vaultID
+	users                  map[string]*store.User         // keyed by email
+	grants                 map[string]map[string]string   // keyed by userID -> vaultID -> role
+	userInvites            map[string]*store.UserInvite   // keyed by token
+	emailVerifications     []*store.EmailVerification
+	passwordResets         []*store.PasswordReset
+	agents                 map[string]*store.Agent                // keyed by name
+	agentVaultGrants       []store.VaultGrant                     // agent vault grants
+	settings               map[string]string                      // instance settings
+	vaultSettings          map[string]map[string]string           // per-vault: vaultID -> key -> value
+	credStores             map[string]*store.VaultCredentialStore // per-vault external credential store config
+	unmatchedHosts         map[string][]store.UnmatchedHost       // keyed by vaultID
+	sessionCounter         int
 }
 
 func newMockStore() *mockStore {
@@ -123,6 +124,20 @@ func (m *mockStore) ListCredentialSources(_ context.Context, vaultID string) ([]
 		}
 	}
 	return sources, nil
+}
+
+func (m *mockStore) SetCredentialSource(_ context.Context, source store.CredentialSource) (*store.CredentialSource, error) {
+	if m.setCredentialSourceErr != nil {
+		return nil, m.setCredentialSourceErr
+	}
+	copy := source
+	m.credentialSources[source.VaultID+":"+source.CredentialKey] = &copy
+	return &copy, nil
+}
+
+func (m *mockStore) DeleteCredentialSource(_ context.Context, vaultID, key string) error {
+	delete(m.credentialSources, vaultID+":"+key)
+	return nil
 }
 
 func (m *mockStore) GetMasterKeyRecord(_ context.Context) (*store.MasterKeyRecord, error) {
@@ -306,6 +321,7 @@ func (m *mockStore) SetCredential(_ context.Context, vaultID, key string, cipher
 		ID:         "credential-" + key,
 		VaultID:    vaultID,
 		Key:        key,
+		Type:       "static",
 		Ciphertext: ciphertext,
 		Nonce:      nonce,
 	}
@@ -344,7 +360,7 @@ func (m *mockStore) GetVaultByID(_ context.Context, id string) (*store.Vault, er
 func (m *mockStore) GetCredential(_ context.Context, vaultID, key string) (*store.Credential, error) {
 	s, ok := m.credentials[vaultID+":"+key]
 	if !ok {
-		return nil, fmt.Errorf("credential not found")
+		return nil, sql.ErrNoRows
 	}
 	return s, nil
 }
@@ -563,6 +579,7 @@ func (m *mockStore) CreateVault(_ context.Context, name string) (*store.Vault, e
 		UpdatedAt: time.Now(),
 	}
 	m.vaults[name] = ns
+	m.brokerConfigs[ns.ID] = &store.BrokerConfig{ID: "broker-" + name, VaultID: ns.ID, ServicesJSON: "[]"}
 	return ns, nil
 }
 
@@ -610,8 +627,21 @@ func (m *mockStore) SetBrokerConfig(_ context.Context, vaultID, servicesJSON str
 
 func (m *mockStore) GrantVaultRole(_ context.Context, actorID, actorType, vaultID, role string) error {
 	if actorType == "agent" {
+		vaultName := ""
+		for _, vault := range m.vaults {
+			if vault.ID == vaultID {
+				vaultName = vault.Name
+				break
+			}
+		}
+		for i := range m.agentVaultGrants {
+			if m.agentVaultGrants[i].ActorID == actorID && m.agentVaultGrants[i].VaultID == vaultID {
+				m.agentVaultGrants[i].Role = role
+				return nil
+			}
+		}
 		m.agentVaultGrants = append(m.agentVaultGrants, store.VaultGrant{
-			ActorID: actorID, ActorType: "agent", VaultID: vaultID, Role: role, CreatedAt: time.Now(),
+			ActorID: actorID, ActorType: "agent", VaultID: vaultID, VaultName: vaultName, Role: role, CreatedAt: time.Now(),
 		})
 		return nil
 	}
@@ -626,6 +656,12 @@ func (m *mockStore) GrantVaultRole(_ context.Context, actorID, actorType, vaultI
 }
 
 func (m *mockStore) RevokeVaultAccess(_ context.Context, userID, vaultID string) error {
+	for i, grant := range m.agentVaultGrants {
+		if grant.ActorID == userID && grant.VaultID == vaultID {
+			m.agentVaultGrants = append(m.agentVaultGrants[:i], m.agentVaultGrants[i+1:]...)
+			return nil
+		}
+	}
 	if m.grants != nil && m.grants[userID] != nil {
 		delete(m.grants[userID], vaultID)
 		return nil
@@ -1061,7 +1097,14 @@ func (m *mockStore) ListAgents(_ context.Context, vaultID string) ([]store.Agent
 func (m *mockStore) ListAllAgents(_ context.Context) ([]store.Agent, error) {
 	var result []store.Agent
 	for _, ag := range m.agents {
-		result = append(result, *ag)
+		copy := *ag
+		copy.Vaults = nil
+		for _, grant := range m.agentVaultGrants {
+			if grant.ActorID == ag.ID {
+				copy.Vaults = append(copy.Vaults, grant)
+			}
+		}
+		result = append(result, copy)
 	}
 	return result, nil
 }

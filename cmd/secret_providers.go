@@ -117,6 +117,7 @@ func attachSecretProviders(srv *server.Server, cfg runtimeconfig.Runtime, dek []
 		}
 	}
 	registry.Freeze()
+	srv.AttachSecretProviderRegistry(registry)
 	workerID := secretRefreshWorkerID()
 	scheduler, err := secretrefresh.New(secretrefresh.Options{
 		Store: refreshStore, Registry: registry, EncryptionKey: dek, WorkerID: workerID,

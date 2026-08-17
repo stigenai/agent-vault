@@ -12,7 +12,7 @@ import (
 
 var runtimeConfigCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Validate and inspect runtime configuration",
+	Short: "Validate runtime configuration and reconcile fleet state",
 }
 
 var runtimeConfigValidateCmd = &cobra.Command{
