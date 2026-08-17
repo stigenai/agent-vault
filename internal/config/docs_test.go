@@ -99,6 +99,40 @@ func TestKubernetesFleetExamplesParseAndConfigValidates(t *testing.T) {
 	}
 }
 
+func TestKubernetesRelaySidecarExampleIsolatedAndValid(t *testing.T) {
+	root := repositoryRoot(t)
+	dir := filepath.Join(root, "examples", "kubernetes", "relay-sidecar")
+	cfg, err := LoadRelay(ClientOptions{Path: filepath.Join(dir, "relay.toml"), LookupEnv: emptyEnv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRelay(cfg.Relay); err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(dir, "deployment.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest any
+	if err := yaml.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse relay deployment: %v", err)
+	}
+	text := string(manifestBytes)
+	agentStart := strings.Index(text, "- name: agent\n")
+	relayStart := strings.Index(text, "- name: agent-vault-relay\n")
+	if agentStart < 0 || relayStart < 0 || relayStart <= agentStart {
+		t.Fatal("relay deployment does not contain ordered agent and relay containers")
+	}
+	if strings.Contains(text[agentStart:relayStart], "spire-agent-socket") {
+		t.Fatal("untrusted agent container mounts the SPIRE socket")
+	}
+	for _, required := range []string{"spire-agent-socket", "readOnlyRootFilesystem: true", "runAsUser: 65532", "nc -z 127.0.0.1 14322"} {
+		if !strings.Contains(text[relayStart:], required) {
+			t.Errorf("relay container omits %q", required)
+		}
+	}
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	_, filename, _, ok := runtime.Caller(0)
