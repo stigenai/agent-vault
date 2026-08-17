@@ -99,9 +99,9 @@ func TestKubernetesFleetExamplesParseAndConfigValidates(t *testing.T) {
 	}
 }
 
-func TestKubernetesRelaySidecarExampleIsolatedAndValid(t *testing.T) {
+func TestKubernetesRelayExampleUsesSeparateIsolatedPods(t *testing.T) {
 	root := repositoryRoot(t)
-	dir := filepath.Join(root, "examples", "kubernetes", "relay-sidecar")
+	dir := filepath.Join(root, "examples", "kubernetes", "relay")
 	cfg, err := LoadRelay(ClientOptions{Path: filepath.Join(dir, "relay.toml"), LookupEnv: emptyEnv})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,10 @@ func TestKubernetesRelaySidecarExampleIsolatedAndValid(t *testing.T) {
 	if err := ValidateRelay(cfg.Relay); err != nil {
 		t.Fatal(err)
 	}
-	manifestBytes, err := os.ReadFile(filepath.Join(dir, "deployment.yaml"))
+	if cfg.Relay.ListenerMode != "network" || cfg.Relay.ListenAddress != "0.0.0.0:14322" {
+		t.Fatalf("relay does not explicitly opt into network listener: %#v", cfg.Relay)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(dir, "agent.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,17 +121,38 @@ func TestKubernetesRelaySidecarExampleIsolatedAndValid(t *testing.T) {
 		t.Fatalf("parse relay deployment: %v", err)
 	}
 	text := string(manifestBytes)
-	agentStart := strings.Index(text, "- name: agent\n")
-	relayStart := strings.Index(text, "- name: agent-vault-relay\n")
-	if agentStart < 0 || relayStart < 0 || relayStart <= agentStart {
-		t.Fatal("relay deployment does not contain ordered agent and relay containers")
-	}
-	if strings.Contains(text[agentStart:relayStart], "spire-agent-socket") {
+	if strings.Contains(text, "spire-agent-socket") || strings.Contains(text, "csi.spiffe.io") {
 		t.Fatal("untrusted agent container mounts the SPIRE socket")
 	}
-	for _, required := range []string{"spire-agent-socket", "readOnlyRootFilesystem: true", "runAsUser: 65532", "nc -z 127.0.0.1 14322"} {
-		if !strings.Contains(text[relayStart:], required) {
-			t.Errorf("relay container omits %q", required)
+	for _, required := range []string{"http://example-agent-relay:14322", "automountServiceAccountToken: false", "readOnlyRootFilesystem: true"} {
+		if !strings.Contains(text, required) {
+			t.Errorf("agent deployment omits %q", required)
+		}
+	}
+	relayBytes, err := os.ReadFile(filepath.Join(dir, "relay.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayText := string(relayBytes)
+	for _, required := range []string{"kind: Service", "name: example-agent-relay", "spire-agent-socket", "driver: csi.spiffe.io", "runAsUser: 65532", "tcpSocket:"} {
+		if !strings.Contains(relayText, required) {
+			t.Errorf("relay deployment omits %q", required)
+		}
+	}
+	if strings.Contains(relayText, "NET_ADMIN") || strings.Contains(relayText, "privileged: true") {
+		t.Fatal("relay example requires privileged pod permissions")
+	}
+	policyBytes, err := os.ReadFile(filepath.Join(dir, "network-policies.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyText := string(policyBytes)
+	if got := strings.Count(policyText, "kind: NetworkPolicy"); got != 7 {
+		t.Fatalf("network policy count = %d, want 7", got)
+	}
+	for _, required := range []string{"example-agent-default-deny", "example-agent-to-own-relay", "example-agent-relay-default-deny", "example-agent-relay-ingress", "example-agent-relay-to-broker", "kubernetes.io/metadata.name: agent-vault"} {
+		if !strings.Contains(policyText, required) {
+			t.Errorf("network policies omit %q", required)
 		}
 	}
 }

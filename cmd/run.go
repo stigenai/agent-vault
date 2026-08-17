@@ -132,7 +132,7 @@ func runCmdRunE(cmd *cobra.Command, args []string) error {
 	}
 	if sess.WorkloadIdentity {
 		if mode != IsolationHost {
-			return fmt.Errorf("workload identity relay supports host isolation only; use the Kubernetes relay sidecar instead of --isolation=container")
+			return fmt.Errorf("workload identity relay supports host isolation only; use an isolated Kubernetes relay pod instead of --isolation=container")
 		}
 		if cmd.Flags().Changed("ttl") {
 			return fmt.Errorf("--ttl is not applicable to SPIFFE workload identity")

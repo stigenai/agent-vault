@@ -6,5 +6,6 @@ workload_api = "unix:///run/spire/sockets/agent.sock"
 trust_domains = ["spiffe://cluster.example"]
 
 [relay]
-listen_address = "127.0.0.1:14322"
-remote_address = "agent-vault-proxy.agent-vault.svc.cluster.local:443"
+listener_mode = "network"
+listen_address = "0.0.0.0:14322"
+remote_address = "agent-vault.agent-vault.svc.cluster.local:14322"

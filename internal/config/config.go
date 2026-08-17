@@ -102,6 +102,7 @@ type Client struct {
 type Relay struct {
 	ListenAddress string
 	RemoteAddress string
+	ListenerMode  string
 }
 
 type SecretProviderConfig struct {
@@ -236,6 +237,7 @@ type PartialClient struct {
 type PartialRelay struct {
 	ListenAddress *string `toml:"listen_address"`
 	RemoteAddress *string `toml:"remote_address"`
+	ListenerMode  *string `toml:"listener_mode"`
 }
 
 type PartialEncryption struct {

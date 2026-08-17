@@ -14,19 +14,21 @@ trust_domains = ["spiffe://cluster.example"]
 [relay]
 listen_address = "127.0.0.1:15000"
 remote_address = "vault-proxy.example:443"
+listener_mode = "loopback"
 [database]
 url = "file:///must-not-be-read"
 `)
 	cfg, err := LoadRelay(ClientOptions{
 		Path: path,
 		LookupEnv: mapEnv(map[string]string{
-			"AGENT_VAULT_RELAY_LISTEN": "127.0.0.1:16000",
+			"AGENT_VAULT_RELAY_LISTEN":        "0.0.0.0:16000",
+			"AGENT_VAULT_RELAY_LISTENER_MODE": "network",
 		}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Relay.ListenAddress != "127.0.0.1:16000" || cfg.Relay.RemoteAddress != "vault-proxy.example:443" {
+	if cfg.Relay.ListenAddress != "0.0.0.0:16000" || cfg.Relay.RemoteAddress != "vault-proxy.example:443" || cfg.Relay.ListenerMode != "network" {
 		t.Fatalf("relay config = %#v", cfg.Relay)
 	}
 	if cfg.Client.WorkloadAPI != "unix:///run/spire/agent.sock" {
@@ -42,12 +44,25 @@ url = "file:///must-not-be-read"
 
 func TestValidateRelayFailsClosed(t *testing.T) {
 	for _, relay := range []Relay{
-		{ListenAddress: "0.0.0.0:14322", RemoteAddress: "proxy.example:443"},
-		{ListenAddress: "127.0.0.1:14322"},
-		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "https://proxy.example"},
+		{ListenAddress: "0.0.0.0:14322", RemoteAddress: "proxy.example:443", ListenerMode: "loopback"},
+		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "proxy.example:443", ListenerMode: "network"},
+		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "proxy.example:443"},
+		{ListenAddress: "127.0.0.1:14322", ListenerMode: "loopback"},
+		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "https://proxy.example", ListenerMode: "loopback"},
 	} {
 		if err := ValidateRelay(relay); err == nil {
 			t.Fatalf("invalid relay accepted: %#v", relay)
 		}
+	}
+}
+
+func TestValidateRelayAcceptsExplicitNetworkMode(t *testing.T) {
+	relay := Relay{
+		ListenAddress: "0.0.0.0:14322",
+		RemoteAddress: "proxy.example:443",
+		ListenerMode:  "network",
+	}
+	if err := ValidateRelay(relay); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,3 +1,9 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: example-agent
+automountServiceAccountToken: false
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,12 +12,16 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: example-agent
+      app.kubernetes.io/name: example-agent
+      agent-vault.stigen.ai/role: agent
   template:
     metadata:
       labels:
-        app: example-agent
+        app.kubernetes.io/name: example-agent
+        agent-vault.stigen.ai/identity: example-agent
+        agent-vault.stigen.ai/role: agent
     spec:
+      serviceAccountName: example-agent
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -21,8 +31,8 @@ spec:
         - name: agent
           image: ghcr.io/stigenai/example-agent:latest
           env:
-            - {name: HTTPS_PROXY, value: "http://127.0.0.1:14322"}
-            - {name: HTTP_PROXY, value: "http://127.0.0.1:14322"}
+            - {name: HTTPS_PROXY, value: "http://example-agent-relay:14322"}
+            - {name: HTTP_PROXY, value: "http://example-agent-relay:14322"}
             - {name: NO_PROXY, value: "localhost,127.0.0.1"}
             - {name: SSL_CERT_FILE, value: "/etc/agent-vault/ca/ca.pem"}
             - {name: NODE_EXTRA_CA_CERTS, value: "/etc/agent-vault/ca/ca.pem"}
@@ -31,7 +41,7 @@ spec:
             - {name: GIT_SSL_CAINFO, value: "/etc/agent-vault/ca/ca.pem"}
             - {name: DENO_CERT, value: "/etc/agent-vault/ca/ca.pem"}
             - {name: NODE_USE_ENV_PROXY, value: "1"}
-            - {name: OPENCLAW_PROXY_URL, value: "http://127.0.0.1:14322"}
+            - {name: OPENCLAW_PROXY_URL, value: "http://example-agent-relay:14322"}
           volumeMounts:
             - {name: mitm-ca, mountPath: /etc/agent-vault/ca, readOnly: true}
           securityContext:
@@ -41,38 +51,7 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {cpu: 500m, memory: 512Mi}
-
-        - name: agent-vault-relay
-          image: ghcr.io/stigenai/agent-vault-relay:latest
-          args: ["--config", "/etc/agent-vault/relay.toml"]
-          ports:
-            - {name: relay, containerPort: 14322}
-          volumeMounts:
-            - {name: relay-config, mountPath: /etc/agent-vault, readOnly: true}
-            - {name: spire-agent-socket, mountPath: /run/spire/sockets, readOnly: true}
-          readinessProbe:
-            exec:
-              command: ["/bin/sh", "-c", "nc -z 127.0.0.1 14322"]
-            periodSeconds: 5
-            failureThreshold: 3
-          securityContext:
-            runAsUser: 65532
-            runAsGroup: 65532
-            allowPrivilegeEscalation: false
-            capabilities: {drop: ["ALL"]}
-            readOnlyRootFilesystem: true
-          resources:
-            requests: {cpu: 10m, memory: 24Mi}
-            limits: {cpu: 250m, memory: 128Mi}
-
       volumes:
-        - name: relay-config
-          configMap:
-            name: agent-vault-relay-config
         - name: mitm-ca
           configMap:
             name: agent-vault-mitm-ca
-        - name: spire-agent-socket
-          hostPath:
-            path: /run/spire/sockets
-            type: Directory

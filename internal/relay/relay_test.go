@@ -210,6 +210,20 @@ func TestRelayRejectsUnsafeListenerAndInvalidRequestLines(t *testing.T) {
 	}
 }
 
+func TestRelayNetworkListenerRequiresExplicitOptIn(t *testing.T) {
+	networkAddr := &net.TCPAddr{IP: net.IPv4zero, Port: 14322}
+	if err := requireAllowedListener(networkAddr, false); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("network listener without opt-in error = %v", err)
+	}
+	if err := requireAllowedListener(networkAddr, true); err != nil {
+		t.Fatalf("explicit network listener rejected: %v", err)
+	}
+	loopbackAddr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 14322}
+	if err := requireAllowedListener(loopbackAddr, true); err == nil || !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("network mode loopback error = %v", err)
+	}
+}
+
 func TestRelayGracefulShutdownDrainsActiveStream(t *testing.T) {
 	remoteClient, remoteServer := net.Pipe()
 	dialed := make(chan struct{})

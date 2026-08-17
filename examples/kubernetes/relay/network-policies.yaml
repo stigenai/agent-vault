@@ -1,0 +1,130 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent
+      agent-vault.stigen.ai/role: agent
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-to-dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent
+      agent-vault.stigen.ai/role: agent
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-to-own-relay
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent
+      agent-vault.stigen.ai/role: agent
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: example-agent-relay
+              agent-vault.stigen.ai/identity: example-agent
+              agent-vault.stigen.ai/role: relay
+      ports:
+        - {protocol: TCP, port: 14322}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-relay-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent-relay
+      agent-vault.stigen.ai/identity: example-agent
+      agent-vault.stigen.ai/role: relay
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-relay-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent-relay
+      agent-vault.stigen.ai/identity: example-agent
+      agent-vault.stigen.ai/role: relay
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: example-agent
+              agent-vault.stigen.ai/identity: example-agent
+              agent-vault.stigen.ai/role: agent
+      ports:
+        - {protocol: TCP, port: 14322}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-relay-to-dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent-relay
+      agent-vault.stigen.ai/identity: example-agent
+      agent-vault.stigen.ai/role: relay
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-agent-relay-to-broker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent-relay
+      agent-vault.stigen.ai/identity: example-agent
+      agent-vault.stigen.ai/role: relay
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-vault
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-vault
+      ports:
+        - {protocol: TCP, port: 14322}

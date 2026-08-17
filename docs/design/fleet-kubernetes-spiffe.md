@@ -23,10 +23,13 @@ design extends those foundations rather than adding a second persistence path.
 2. A SPIFFE identity is represented by the existing `agent` actor type. The
    `agents` table gains a unique, nullable `spiffe_id`; existing grants, roles,
    audit records, rate limits, and proposal behavior remain applicable.
-3. Agent processes use a local relay or sidecar. The relay alone receives the
-   SPIRE Workload API socket, accepts a local HTTP proxy connection, and sends
-   proxy traffic to Agent Vault over mTLS. The untrusted agent does not receive
-   an SVID private key or Agent Vault bearer token.
+3. Agent processes use a workload-specific relay in a separate pod. Kubernetes
+   network policy cannot isolate containers that share a pod network namespace,
+   so the relay is reached through a ClusterIP Service. The relay alone receives
+   the SPIRE Workload API socket and sends proxy traffic to Agent Vault over
+   mTLS. Default-deny policies let the untrusted agent reach only its matching
+   relay and prevent direct broker egress. No privileged firewall init container
+   is required.
 4. Runtime configuration and desired-state configuration are separate TOML
    documents. Runtime configuration is read locally at process startup. Desired
    state is reconciled through the authenticated HTTP API.
@@ -45,11 +48,17 @@ design extends those foundations rather than adding a second persistence path.
 
 ```mermaid
 flowchart LR
-  subgraph Pod["Agent workload pod"]
-    Agent["Untrusted agent"] -->|"HTTP proxy on loopback"| Relay["Agent Vault relay"]
-    SpireSocket["SPIRE Workload API socket"] --> Relay
-    CLI["Operator CLI or reconciler"] --> SpireSocket
+  subgraph AgentPod["Untrusted agent pod"]
+    Agent["Untrusted agent"]
   end
+  subgraph RelayPod["Workload-specific relay pod"]
+    Relay["Agent Vault relay"]
+    RelaySocket["SPIRE Workload API socket"] --> Relay
+  end
+  subgraph OperatorPod["Operator or reconciler pod"]
+    CLISocket["SPIRE Workload API socket"] --> CLI["Operator CLI or reconciler"]
+  end
+  Agent -->|"HTTP proxy through restricted Service"| Relay
 
   Relay -->|"mTLS using X.509-SVID"| Proxy["Agent Vault proxy replicas"]
   CLI -->|"mTLS control API"| API["Agent Vault API replicas"]
@@ -205,8 +214,9 @@ listener until the fleet switches the proxy to SPIFFE-only.
 
 The relay is the compatibility boundary for arbitrary agents:
 
-1. Only the relay container receives the Workload API socket.
-2. The agent sees a loopback HTTP proxy and the existing MITM CA bundle.
+1. Only the relay pod receives the Workload API socket.
+2. The agent sees a workload-specific HTTP proxy Service and the existing MITM
+   CA bundle. NetworkPolicy permits only the matching relay endpoint.
 3. The relay establishes an outer mTLS connection to the central proxy and
    streams standard CONNECT or absolute-form proxy requests.
 4. Agent Vault authorizes the peer SPIFFE ID, resolves its vault grant, and
@@ -284,7 +294,7 @@ includes:
 
 1. Land typed runtime configuration without changing legacy defaults.
 2. Add SPIFFE-backed agents and mTLS API/proxy listeners.
-3. Add the relay/sidecar and prove SVID rotation end to end.
+3. Add the isolated relay pod and prove SVID rotation end to end.
 4. Add multiple DEK wrappers and perform a recovery drill.
 5. Refactor secret stores to per-credential providers and add provider drivers.
 6. Add desired-state plan/apply and CLI import workflows.

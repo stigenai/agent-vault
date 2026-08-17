@@ -135,7 +135,10 @@ func LoadRelay(opts ClientOptions) (RelayClient, error) {
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
-	result := RelayClient{Client: client, Relay: Relay{ListenAddress: "127.0.0.1:14322"}}
+	result := RelayClient{Client: client, Relay: Relay{
+		ListenAddress: "127.0.0.1:14322",
+		ListenerMode:  "loopback",
+	}}
 	path, required := discoverPath(Options{Path: opts.Path, DefaultPath: opts.DefaultPath}, lookup)
 	if path != "" {
 		partial, err := decodeFile(path)
@@ -150,6 +153,9 @@ func LoadRelay(opts ClientOptions) (RelayClient, error) {
 			if partial.Relay.RemoteAddress != nil {
 				result.Relay.RemoteAddress = *partial.Relay.RemoteAddress
 			}
+			if partial.Relay.ListenerMode != nil {
+				result.Relay.ListenerMode = *partial.Relay.ListenerMode
+			}
 		}
 	}
 	if value, ok := lookup("AGENT_VAULT_RELAY_LISTEN"); ok && strings.TrimSpace(value) != "" {
@@ -157,6 +163,9 @@ func LoadRelay(opts ClientOptions) (RelayClient, error) {
 	}
 	if value, ok := lookup("AGENT_VAULT_RELAY_REMOTE"); ok && strings.TrimSpace(value) != "" {
 		result.Relay.RemoteAddress = value
+	}
+	if value, ok := lookup("AGENT_VAULT_RELAY_LISTENER_MODE"); ok && strings.TrimSpace(value) != "" {
+		result.Relay.ListenerMode = value
 	}
 	return result, nil
 }
@@ -167,8 +176,20 @@ func ValidateRelay(relay Relay) error {
 		return fmt.Errorf("relay.listen_address: expected host:port: %w", err)
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("relay.listen_address: must use an explicit loopback IP")
+	if ip == nil {
+		return fmt.Errorf("relay.listen_address: must use an explicit IP address")
+	}
+	switch relay.ListenerMode {
+	case "loopback":
+		if !ip.IsLoopback() {
+			return fmt.Errorf("relay.listen_address: listener_mode loopback requires a loopback IP")
+		}
+	case "network":
+		if ip.IsLoopback() {
+			return fmt.Errorf("relay.listen_address: listener_mode network requires a non-loopback IP")
+		}
+	default:
+		return fmt.Errorf("relay.listener_mode: expected loopback or network")
 	}
 	if port, err := strconv.Atoi(listenPort); err != nil || port < 0 || port > 65535 {
 		return fmt.Errorf("relay.listen_address: invalid port")

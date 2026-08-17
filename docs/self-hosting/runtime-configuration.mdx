@@ -157,7 +157,13 @@ AWS uses the SDK default chain, including EKS Pod Identity and IRSA. OpenBao req
 
 In SPIFFE mode, `auth.workload_api` must be an absolute `unix:///` socket, every `auth.trust_domains` entry must be a trust-domain URI such as `spiffe://cluster.example`, and every `auth.bootstrap_owner_ids` entry must be an exact ID in one of those domains. The owner list is claimed transactionally once. Later TOML changes cannot add bootstrap owners; if all bootstrapped owners are removed, startup fails closed instead of replaying bootstrap.
 
-For in-cluster operator commands, configure `client.address`, `client.workload_api`, and `client.trust_domains` in the same TOML file (or use `AGENT_VAULT_ADDR`, `SPIFFE_ENDPOINT_SOCKET`, and `AGENT_VAULT_SPIFFE_TRUST_DOMAINS`). The CLI loads only the `[client]` section and does not resolve server-side database or encryption references. When workload identity is configured, every control-plane request uses the live rotating SVID, sends no bearer token, writes no `~/.agent-vault/session.json`, and never falls back to password re-authentication. `agent-vault run` cannot delegate an SVID to a child process; use the relay sidecar for workload proxy traffic.
+For in-cluster operator commands, configure `client.address`, `client.workload_api`, and `client.trust_domains` in the same TOML file (or use `AGENT_VAULT_ADDR`, `SPIFFE_ENDPOINT_SOCKET`, and `AGENT_VAULT_SPIFFE_TRUST_DOMAINS`). The CLI loads only the `[client]` section and does not resolve server-side database or encryption references. When workload identity is configured, every control-plane request uses the live rotating SVID, sends no bearer token, writes no `~/.agent-vault/session.json`, and never falls back to password re-authentication. `agent-vault run` cannot delegate an SVID to a child process; use the isolated Kubernetes relay for workload proxy traffic.
+
+### Workload relay listener
+
+The relay's `[relay]` table accepts `listen_address`, `remote_address`, and `listener_mode`. `listener_mode` defaults to `loopback` and rejects non-loopback addresses. Set `listener_mode = "network"` only when the relay runs in a separate pod protected by default-deny NetworkPolicies; network mode rejects loopback addresses so a topology mismatch fails during startup. See the [Kubernetes relay example](https://github.com/stigenai/agent-vault/tree/main/examples/kubernetes/relay).
+
+`AGENT_VAULT_RELAY_LISTEN`, `AGENT_VAULT_RELAY_REMOTE`, and `AGENT_VAULT_RELAY_LISTENER_MODE` override those TOML fields for compatibility. Fleet deployments should keep the topology in TOML.
 
 ## Kubernetes fleet example
 

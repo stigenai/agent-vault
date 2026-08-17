@@ -27,17 +27,19 @@ const DefaultRequestLineLimit = 8 * 1024
 type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 type Options struct {
-	RemoteAddr       string
-	DialContext      DialContextFunc
-	RequestLineLimit int
-	ConnectTimeout   time.Duration
+	RemoteAddr           string
+	DialContext          DialContextFunc
+	RequestLineLimit     int
+	ConnectTimeout       time.Duration
+	AllowNetworkListener bool
 }
 
 type Relay struct {
-	remoteAddr     string
-	dial           DialContextFunc
-	lineLimit      int
-	connectTimeout time.Duration
+	remoteAddr           string
+	dial                 DialContextFunc
+	lineLimit            int
+	connectTimeout       time.Duration
+	allowNetworkListener bool
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -74,20 +76,21 @@ func New(opts Options) (*Relay, error) {
 	}
 	dialCtx, cancel := context.WithCancel(context.Background())
 	return &Relay{
-		remoteAddr:     opts.RemoteAddr,
-		dial:           dial,
-		lineLimit:      lineLimit,
-		connectTimeout: connectTimeout,
-		conns:          make(map[net.Conn]struct{}),
-		dialCtx:        dialCtx,
-		cancel:         cancel,
+		remoteAddr:           opts.RemoteAddr,
+		dial:                 dial,
+		lineLimit:            lineLimit,
+		connectTimeout:       connectTimeout,
+		allowNetworkListener: opts.AllowNetworkListener,
+		conns:                make(map[net.Conn]struct{}),
+		dialCtx:              dialCtx,
+		cancel:               cancel,
 	}, nil
 }
 
-// Serve accepts local proxy connections. The listener must be bound to an
-// explicit loopback address; wildcard and non-TCP listeners fail closed.
+// Serve accepts proxy connections. Listeners are loopback-only unless the
+// caller explicitly enables a network listener for a separately isolated pod.
 func (r *Relay) Serve(listener net.Listener) error {
-	if err := requireLoopback(listener.Addr()); err != nil {
+	if err := requireAllowedListener(listener.Addr(), r.allowNetworkListener); err != nil {
 		_ = listener.Close()
 		return err
 	}
@@ -231,10 +234,16 @@ func validProxyRequestLine(raw []byte) bool {
 
 const httpMethodConnect = "CONNECT"
 
-func requireLoopback(addr net.Addr) error {
+func requireAllowedListener(addr net.Addr, allowNetwork bool) error {
 	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok || tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+	if !ok || tcpAddr.IP == nil {
+		return fmt.Errorf("relay listener must use an explicit TCP address, got %q", addr.String())
+	}
+	if !allowNetwork && !tcpAddr.IP.IsLoopback() {
 		return fmt.Errorf("relay listener must use an explicit loopback TCP address, got %q", addr.String())
+	}
+	if allowNetwork && tcpAddr.IP.IsLoopback() {
+		return fmt.Errorf("relay network listener must use a non-loopback TCP address, got %q", addr.String())
 	}
 	return nil
 }

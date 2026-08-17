@@ -18,7 +18,7 @@ import (
 
 var relayCmd = &cobra.Command{
 	Use:   "relay",
-	Short: "Run the loopback SPIFFE proxy relay",
+	Short: "Run the SPIFFE proxy relay",
 	Args:  cobra.NoArgs,
 	RunE:  runRelayCommand,
 }
@@ -43,7 +43,11 @@ func runRelayCommand(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	r, err := localrelay.New(localrelay.Options{RemoteAddr: cfg.Relay.RemoteAddress, DialContext: dial})
+	r, err := localrelay.New(localrelay.Options{
+		RemoteAddr:           cfg.Relay.RemoteAddress,
+		DialContext:          dial,
+		AllowNetworkListener: cfg.Relay.ListenerMode == "network",
+	})
 	if err != nil {
 		return err
 	}
@@ -76,6 +80,9 @@ func loadRelayConfig(cmd *cobra.Command) (runtimeconfig.RelayClient, error) {
 	if cmd.Flags().Changed("remote") {
 		cfg.Relay.RemoteAddress, _ = cmd.Flags().GetString("remote")
 	}
+	if cmd.Flags().Changed("listener-mode") {
+		cfg.Relay.ListenerMode, _ = cmd.Flags().GetString("listener-mode")
+	}
 	if err := runtimeconfig.ValidateRelay(cfg.Relay); err != nil {
 		return runtimeconfig.RelayClient{}, err
 	}
@@ -96,7 +103,8 @@ func relayTrustDomains(rawDomains []string) ([]spiffeid.TrustDomain, error) {
 
 func init() {
 	relayCmd.Flags().String("config", "", "path to versioned TOML configuration")
-	relayCmd.Flags().String("listen", "", "override relay loopback listen address")
+	relayCmd.Flags().String("listen", "", "override relay listen address")
 	relayCmd.Flags().String("remote", "", "override central proxy host:port")
+	relayCmd.Flags().String("listener-mode", "", "override relay listener mode (loopback or network)")
 	rootCmd.AddCommand(relayCmd)
 }
