@@ -97,11 +97,17 @@ type Server struct {
 	secretRefresh   *secretrefresh.Scheduler
 	secretProviders *secretprovider.Registry
 	providerClosers []io.Closer
+	readinessChecks []readinessCheck
 	// infisicalDynamic resolves Infisical dynamic-secret leases on demand; built
 	// in Run alongside the syncer when a client is attached. Nil disables it.
 	infisicalDynamic *infisical.DynamicResolver
 	oauthRefresher   *oauth.Refresher
 	telemetry        *telemetry.Telemetry
+}
+
+type readinessCheck struct {
+	failure string
+	check   func(context.Context) error
 }
 
 // lockVaultServices acquires the per-vault mutation lock via the store's
@@ -144,6 +150,15 @@ func (s *Server) AttachSecretProviderCloser(closer io.Closer) {
 	if closer != nil {
 		s.providerClosers = append(s.providerClosers, closer)
 	}
+}
+
+// AttachReadinessCheck adds a non-secret dependency check. Checks are attached
+// during startup before the HTTP listener begins serving requests.
+func (s *Server) AttachReadinessCheck(failure string, check func(context.Context) error) {
+	if failure == "" || check == nil {
+		return
+	}
+	s.readinessChecks = append(s.readinessChecks, readinessCheck{failure: failure, check: check})
 }
 
 // AttachLogSink swaps the per-request log sink. Safe to call once at
@@ -866,11 +881,19 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	}
 	mux := http.NewServeMux()
 	rl := ratelimit.New(opts.RateLimit)
+	limited := rl.GlobalMiddleware(logger)(mux)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && healthProbePath(r.URL.Path) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		limited.ServeHTTP(w, r)
+	})
 
 	s := &Server{
 		httpServer: &http.Server{
 			Addr:              addr,
-			Handler:           securityHeaders(rl.GlobalMiddleware(logger)(mux)),
+			Handler:           securityHeaders(handler),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      60 * time.Second,
@@ -903,6 +926,9 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	// /health, /v1/status, and other public static routes rely on the
 	// server-wide TierGlobal backstop; no per-route limit is useful.
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/startup", s.handleStartup)
+	mux.HandleFunc("GET /health/ready", s.handleReady)
+	mux.HandleFunc("GET /health/live", s.handleLive)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("POST /v1/auth/register", s.requireLegacyAuth(ipAuth(limitBody(s.handleRegister))))
 	mux.HandleFunc("POST /v1/auth/verify", s.requireLegacyAuth(ipAuth(limitBody(s.handleVerify))))
@@ -1062,6 +1088,15 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("GET /{$}", s.handleSPA)
 
 	return s
+}
+
+func healthProbePath(path string) bool {
+	switch path {
+	case "/health", "/health/startup", "/health/ready", "/health/live":
+		return true
+	default:
+		return false
+	}
 }
 
 // requireInitialized returns 503 when no owner account exists yet.

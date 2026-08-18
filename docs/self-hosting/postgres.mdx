@@ -165,9 +165,21 @@ services:
 
 `sslmode=disable` is acceptable only for disposable local development on a trusted container network. Production deployments must use `verify-full` with an explicit trusted CA.
 
+## Kubernetes probe contract
+
+Use the dependency-specific endpoints from the fleet manifest:
+
+| Endpoint | Purpose | External failures affect it? |
+|---|---|---|
+| `GET /health/startup` | Confirms the listener exists after migrations, SVID acquisition, DEK unwrap, and provider construction | Startup cannot listen until those steps succeed |
+| `GET /health/ready` | Gates traffic on PostgreSQL, current SVID validity, and usable provider-backed credential caches | Yes; an expired last-known-good cache removes the pod from service |
+| `GET /health/live` | Confirms the process and HTTP server can answer | No; database or provider outages do not trigger restarts |
+
+The kubelet's probe timeout makes an unresponsive or deadlocked HTTP process fail liveness. A transient provider outage can fail readiness after the configured cache staleness window, but it never fails liveness and therefore does not create a destructive restart loop. `GET /health` remains a backward-compatible alias for readiness.
+
 ## Operational notes
 
-- `GET /health` pings PostgreSQL with a bounded timeout. Failures return only `database unreachable`; credentials and driver diagnostics are not exposed in the response.
+- Readiness pings PostgreSQL with a bounded timeout. Failures return only safe component status; credentials and driver diagnostics are not exposed in the response.
 - Startup connectivity and migration errors retain useful context while redacting URL passwords.
 - The shared advisory lock prevents concurrent migration-ledger changes.
 - Refresh work uses database leases so another replica takes over only after the claim expires.

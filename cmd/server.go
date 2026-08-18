@@ -214,6 +214,11 @@ var serverCmd = &cobra.Command{
 		serverOpts := resolvedServerOptions(cfg)
 		serverOpts.TLSConfig = listenerTLS
 		srv := server.NewWithRuntime(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger, serverOpts)
+		if identitySource != nil {
+			srv.AttachReadinessCheck("workload identity unavailable", func(context.Context) error {
+				return identitySource.Ready()
+			})
+		}
 		srv.SetSkills(skillCLI)
 		if cfg.Telemetry.Enabled {
 			srv.AttachTelemetry(tel)
@@ -709,6 +714,11 @@ func runDetachedChild(cfg runtimeconfig.Runtime, addr string, logger *slog.Logge
 	serverOpts := resolvedServerOptions(cfg)
 	serverOpts.TLSConfig = listenerTLS
 	srv := server.NewWithRuntime(addr, db, key, notifier, initialized, baseURL, logger, serverOpts)
+	if identitySource != nil {
+		srv.AttachReadinessCheck("workload identity unavailable", func(context.Context) error {
+			return identitySource.Ready()
+		})
+	}
 	srv.SetSkills(skillCLI)
 	if cfg.Telemetry.Enabled {
 		srv.AttachTelemetry(tel)

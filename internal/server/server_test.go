@@ -1423,6 +1423,102 @@ func TestHealthEndpointSanitizesPostgresFailure(t *testing.T) {
 	}
 }
 
+func TestHealthProbesSeparateLivenessFromReadiness(t *testing.T) {
+	srv := newTestServer()
+	mock := srv.store.(*mockStore)
+	mock.dialectName = "postgres"
+	mock.pingErr = errors.New("database unavailable")
+
+	for _, path := range []string{"/health/startup", "/health/live"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", rec.Code)
+	}
+}
+
+func TestHealthProbesBypassGlobalRateLimit(t *testing.T) {
+	srv := newTestServer()
+	for {
+		if decision := srv.rateLimit.AllowGlobalRPS(); !decision.Allow {
+			break
+		}
+	}
+
+	for _, path := range []string{"/health", "/health/startup", "/health/ready", "/health/live"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s was rate limited: status = %d", path, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("non-probe status = %d, want 429", rec.Code)
+	}
+}
+
+func TestReadinessSPIFFEFailureIsNonSecret(t *testing.T) {
+	srv := newTestServer()
+	srv.AttachReadinessCheck("workload identity unavailable", func(context.Context) error {
+		return errors.New("SPIFFE socket /secret/path and SVID spiffe://secret.example/workload")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "workload identity unavailable") || strings.Contains(body, "secret.example") || strings.Contains(body, "/secret/path") {
+		t.Fatalf("unsafe readiness response: %s", body)
+	}
+}
+
+func TestReadinessUsesCredentialSourceMaxStaleness(t *testing.T) {
+	srv := newTestServer()
+	mock := srv.store.(*mockStore)
+	now := time.Now().UTC()
+	timePointer := func(value time.Time) *time.Time { return &value }
+	mock.credentialSources["root-ns-id:API_TOKEN"] = &store.CredentialSource{
+		VaultID: "root-ns-id", CredentialKey: "API_TOKEN",
+		Kind: store.CredentialSourceAWSSecretsManager, ProviderName: "aws-production",
+		MaxStalenessSeconds: 60, Health: store.CredentialSourceHealthStale,
+		LastSuccessAt: timePointer(now.Add(-2 * time.Minute)), CacheUpdatedAt: timePointer(now.Add(-2 * time.Minute)),
+	}
+
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request(); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "credential sources unavailable") {
+		t.Fatalf("stale source readiness = %d %s", rec.Code, rec.Body.String())
+	}
+
+	source := mock.credentialSources["root-ns-id:API_TOKEN"]
+	source.LastSuccessAt = timePointer(now)
+	source.CacheUpdatedAt = timePointer(now)
+	source.Health = store.CredentialSourceHealthError
+	if rec := request(); rec.Code != http.StatusOK {
+		t.Fatalf("usable last-known-good cache readiness = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // setupMockStoreWithUser creates a mock store with a user account.
 func setupMockStoreWithUser(t *testing.T, email, password string) *mockStore {
 	t.Helper()

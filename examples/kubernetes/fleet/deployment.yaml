@@ -23,10 +23,21 @@ spec:
             - {name: config, mountPath: /etc/agent-vault, readOnly: true}
             - {name: secrets, mountPath: /var/run/secrets/agent-vault, readOnly: true}
             - {name: spire-agent-socket, mountPath: /run/spire/sockets, readOnly: true}
+          startupProbe:
+            httpGet: {path: /health/startup, port: api, scheme: HTTPS}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
           readinessProbe:
-            httpGet: {path: /health, port: api, scheme: HTTPS}
+            httpGet: {path: /health/ready, port: api, scheme: HTTPS}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
           livenessProbe:
-            httpGet: {path: /health, port: api, scheme: HTTPS}
+            httpGet: {path: /health/live, port: api, scheme: HTTPS}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
       volumes:
         - name: config
           configMap:
