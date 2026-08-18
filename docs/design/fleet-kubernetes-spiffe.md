@@ -1,6 +1,6 @@
 # Fleet deployment with Kubernetes, SPIFFE, and declarative configuration
 
-Status: proposed
+Status: implemented and verified
 
 ## Context
 
@@ -301,6 +301,10 @@ includes:
 7. Follow the [hybrid-to-SPIFFE-only runbook](/self-hosting/spiffe-migration):
    inventory and bind identities, soak both paths, revoke persisted legacy
    credentials, then switch the fleet deployment to SPIFFE-only mode.
+8. Enable [fleet observability](/self-hosting/observability) with authenticated
+   broker metrics, SPIFFE-mTLS relay metrics, bounded labels, and alerts for
+   identity expiry, provider staleness, reconciliation, storage, and relay
+   connectivity.
 
 ## Security acceptance boundaries
 
