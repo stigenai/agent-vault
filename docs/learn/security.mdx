@@ -178,9 +178,11 @@ Hard caps prevent unbounded growth in vault state:
 
 - **Parameterized queries**: Same prepared-statement approach as SQLite, preventing SQL injection.
 - **Foreign key cascades**: Same cascade behavior as SQLite.
-- **TLS**: Use `?sslmode=require` or `?sslmode=verify-full` in your connection URL for encrypted connections to the database.
-- **Access controls**: The database user should have access only to the Agent Vault database. Credentials are encrypted at rest by the DEK regardless of database-level access, but limiting access reduces attack surface.
+- **TLS**: Production fleets use `database.tls_mode = "verify-full"` with an explicit `database.tls_root_cert`; local-only Compose may use `sslmode=disable`.
+- **Access controls**: The runtime role owns only the Agent Vault database and schema. It has DDL ownership for startup migrations but no cluster-administration privileges.
 - **Advisory locks**: Service-config writes use `pg_advisory_lock` to prevent concurrent conflicting updates across instances.
+
+For production fleets, set `database.tls_mode = "verify-full"` with an explicit `database.tls_root_cert`. Use a dedicated login that owns only the Agent Vault database and schema: startup migrations need DDL ownership, but never `SUPERUSER`, `CREATEDB`, `CREATEROLE`, replication, or bypass-RLS privileges. Bound total database demand as `replicas × database.max_open_conns`, leaving capacity for operators, monitoring, migrations, and failover overlap.
 
 ## Sensitive data handling
 

@@ -98,10 +98,12 @@ func (database *postgresHATestDatabase) openReplicas(t *testing.T, count int) []
 			defer workers.Done()
 			<-start
 			stores[index], errs[index] = openPostgres(StoreConfig{
-				DatabaseURL:    database.dsn,
-				MaxOpenConns:   4,
-				MaxIdleConns:   2,
-				PoolConfigured: true,
+				DatabaseURL:     database.dsn,
+				MaxOpenConns:    4,
+				MaxIdleConns:    2,
+				ConnMaxLifetime: 5 * time.Minute,
+				ConnectTimeout:  10 * time.Second,
+				PoolConfigured:  true,
 			})
 		}()
 	}

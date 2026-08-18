@@ -234,6 +234,12 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 	if err := setDuration("DB_CONN_MAX_LIFETIME", "database.conn_max_lifetime", &result.Config.Database.ConnMaxLifetime); err != nil {
 		return err
 	}
+	if err := setDuration("DB_CONNECT_TIMEOUT", "database.connect_timeout", &result.Config.Database.ConnectTimeout); err != nil {
+		return err
+	}
+	setString("DB_TLS_MODE", "database.tls_mode", &result.Config.Database.TLSMode)
+	result.Config.Database.TLSMode = strings.ToLower(result.Config.Database.TLSMode)
+	setString("DB_TLS_ROOT_CERT", "database.tls_root_cert", &result.Config.Database.TLSRootCert)
 
 	if err := setInt64("AGENT_VAULT_MAX_REQUEST_BYTES", "proxy.max_request_bytes", &result.Config.Proxy.MaxRequestBytes); err != nil {
 		return err
@@ -375,6 +381,18 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 	if v := partial.Database.ConnMaxLifetime; v != nil {
 		result.Config.Database.ConnMaxLifetime = time.Duration(*v)
 		set("database.conn_max_lifetime")
+	}
+	if v := partial.Database.ConnectTimeout; v != nil {
+		result.Config.Database.ConnectTimeout = time.Duration(*v)
+		set("database.connect_timeout")
+	}
+	if v := partial.Database.TLSMode; v != nil {
+		result.Config.Database.TLSMode = strings.ToLower(*v)
+		set("database.tls_mode")
+	}
+	if v := partial.Database.TLSRootCert; v != nil {
+		result.Config.Database.TLSRootCert = *v
+		set("database.tls_root_cert")
 	}
 	if v := partial.Proxy.MaxRequestBytes; v != nil {
 		result.Config.Proxy.MaxRequestBytes = *v

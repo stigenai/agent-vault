@@ -51,6 +51,8 @@ type mockStore struct {
 	credStores             map[string]*store.VaultCredentialStore // per-vault external credential store config
 	unmatchedHosts         map[string][]store.UnmatchedHost       // keyed by vaultID
 	sessionCounter         int
+	dialectName            string
+	pingErr                error
 }
 
 func newMockStore() *mockStore {
@@ -462,9 +464,14 @@ func (m *mockStore) ExpirePendingProposals(_ context.Context, before time.Time) 
 	return 0, nil
 }
 
-func (m *mockStore) Close() error                                         { return nil }
-func (m *mockStore) Ping(_ context.Context) error                         { return nil }
-func (m *mockStore) DialectName() string                                  { return "sqlite" }
+func (m *mockStore) Close() error                 { return nil }
+func (m *mockStore) Ping(_ context.Context) error { return m.pingErr }
+func (m *mockStore) DialectName() string {
+	if m.dialectName != "" {
+		return m.dialectName
+	}
+	return "sqlite"
+}
 func (m *mockStore) GetCAState(_ context.Context) (*store.CAState, error) { return nil, nil }
 func (m *mockStore) SetCAState(_ context.Context, _ *store.CAState) error { return nil }
 
@@ -1392,6 +1399,27 @@ func TestHealthEndpointRejectsPost(t *testing.T) {
 
 	if rec.Code == http.StatusOK {
 		t.Fatal("expected non-200 status for POST /health")
+	}
+}
+
+func TestHealthEndpointSanitizesPostgresFailure(t *testing.T) {
+	srv := newTestServer()
+	mock := srv.store.(*mockStore)
+	mock.dialectName = "postgres"
+	mock.pingErr = errors.New("postgres://operator:never-print-this@db.example/agentvault unavailable")
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want 503", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "never-print-this") || strings.Contains(rec.Body.String(), "db.example") {
+		t.Fatalf("health response leaked database diagnostic: %s", rec.Body.String())
+	}
+	if got := rec.Body.String(); !strings.Contains(got, `"error":"database unreachable"`) {
+		t.Fatalf("health response = %s", got)
 	}
 }
 

@@ -125,7 +125,8 @@ var serverCmd = &cobra.Command{
 		db, err := store.OpenStore(store.StoreConfig{
 			DatabaseURL: dbURL, SQLitePath: dbPath,
 			MaxOpenConns: cfg.Database.MaxOpenConns, MaxIdleConns: cfg.Database.MaxIdleConns,
-			ConnMaxLifetime: cfg.Database.ConnMaxLifetime, PoolConfigured: true,
+			ConnMaxLifetime: cfg.Database.ConnMaxLifetime, ConnectTimeout: cfg.Database.ConnectTimeout,
+			TLSMode: cfg.Database.TLSMode, TLSRootCert: cfg.Database.TLSRootCert, PoolConfigured: true,
 		})
 		if err != nil {
 			return fmt.Errorf("opening store: %w", err)
@@ -685,7 +686,8 @@ func runDetachedChild(cfg runtimeconfig.Runtime, addr string, logger *slog.Logge
 	db, err := store.OpenStore(store.StoreConfig{
 		DatabaseURL: dbURL, SQLitePath: cfg.Database.SQLitePath,
 		MaxOpenConns: cfg.Database.MaxOpenConns, MaxIdleConns: cfg.Database.MaxIdleConns,
-		ConnMaxLifetime: cfg.Database.ConnMaxLifetime, PoolConfigured: true,
+		ConnMaxLifetime: cfg.Database.ConnMaxLifetime, ConnectTimeout: cfg.Database.ConnectTimeout,
+		TLSMode: cfg.Database.TLSMode, TLSRootCert: cfg.Database.TLSRootCert, PoolConfigured: true,
 	})
 	if err != nil {
 		return fmt.Errorf("opening store: %w", err)

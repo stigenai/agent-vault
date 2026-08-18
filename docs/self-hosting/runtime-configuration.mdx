@@ -47,6 +47,9 @@ Sensitive TOML fields accept references only:
 ```toml
 [database]
 url = "env://DATABASE_URL"
+tls_mode = "verify-full"
+tls_root_cert = "/var/run/secrets/agent-vault/postgres-ca.crt"
+connect_timeout = "10s"
 
 [encryption]
 legacy_master_password = "file:///var/run/secrets/agent-vault/master-password"
@@ -80,6 +83,9 @@ All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP add
 | `database.max_open_conns` | `25` | `DB_MAX_OPEN_CONNS` |
 | `database.max_idle_conns` | `10` | `DB_MAX_IDLE_CONNS` |
 | `database.conn_max_lifetime` | `5m` | `DB_CONN_MAX_LIFETIME` |
+| `database.connect_timeout` | `10s` | `DB_CONNECT_TIMEOUT` |
+| `database.tls_mode` | empty (URL/default compatibility) | `DB_TLS_MODE`; `disable`, `require`, `verify-ca`, or `verify-full` |
+| `database.tls_root_cert` | empty | `DB_TLS_ROOT_CERT`; absolute CA bundle path required with `verify-ca` or `verify-full` |
 | `proxy.max_request_bytes` | `1073741824` | `AGENT_VAULT_MAX_REQUEST_BYTES` / `--max-request-bytes` |
 | `proxy.max_response_bytes` | `0` (unlimited) | `AGENT_VAULT_MAX_RESPONSE_BYTES` / `--max-response-bytes` |
 | `proxy.allow_private_ranges` | `false` | `AGENT_VAULT_ALLOW_PRIVATE_RANGES` |
@@ -173,8 +179,9 @@ Create the referenced Secret without placing values in Git:
 
 ```bash
 kubectl -n agent-vault create secret generic agent-vault-secrets \
-  --from-literal=database-url='postgres://agentvault:REPLACE@postgres.example:5432/agentvault?sslmode=require' \
-  --from-literal=master-password="$(openssl rand -hex 32)"
+  --from-literal=database-url='postgres://agentvault:REPLACE@postgres.example:5432/agentvault' \
+  --from-literal=master-password="$(openssl rand -hex 32)" \
+  --from-file=postgres-ca.crt=/path/to/postgres-ca.crt
 ```
 
 Apply the ConfigMap and Deployment together:

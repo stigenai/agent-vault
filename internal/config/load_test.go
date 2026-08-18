@@ -26,6 +26,9 @@ sqlite_path = ""
 max_open_conns = 40
 max_idle_conns = 20
 conn_max_lifetime = "10m"
+connect_timeout = "12s"
+tls_mode = "verify-full"
+tls_root_cert = "/etc/ssl/postgres/ca.crt"
 
 [proxy]
 max_request_bytes = 2000
@@ -76,7 +79,7 @@ func TestDefaults(t *testing.T) {
 	want := Runtime{
 		SchemaVersion: SchemaVersion,
 		Server:        Server{Host: "127.0.0.1", Port: 14321, ProxyPort: 14322, LogLevel: "info"},
-		Database:      Database{MaxOpenConns: 25, MaxIdleConns: 10, ConnMaxLifetime: 5 * time.Minute},
+		Database:      Database{MaxOpenConns: 25, MaxIdleConns: 10, ConnMaxLifetime: 5 * time.Minute, ConnectTimeout: 10 * time.Second},
 		Proxy:         Proxy{MaxRequestBytes: 1 << 30},
 		Auth:          Auth{Mode: "legacy"},
 		Client:        Client{Address: "http://127.0.0.1:14321"},
@@ -115,6 +118,7 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 		},
 		Database: Database{
 			URL: secretValue("env://TOML_DATABASE_URL", "postgres://toml/db"), MaxOpenConns: 40, MaxIdleConns: 20, ConnMaxLifetime: 10 * time.Minute,
+			ConnectTimeout: 12 * time.Second, TLSMode: "verify-full", TLSRootCert: "/etc/ssl/postgres/ca.crt",
 		},
 		Proxy: Proxy{
 			MaxRequestBytes: 2000, MaxResponseBytes: 1000, AllowPrivateRanges: true,
@@ -166,6 +170,7 @@ func TestLoadPrecedenceEveryField(t *testing.T) {
 		"AGENT_VAULT_ADDR": "https://env.example", "AGENT_VAULT_LOG_LEVEL": "info", "AGENT_VAULT_DETACH": "false",
 		"DATABASE_URL": "postgres://env/db", "AGENT_VAULT_SQLITE_PATH": "",
 		"DB_MAX_OPEN_CONNS": "50", "DB_MAX_IDLE_CONNS": "30", "DB_CONN_MAX_LIFETIME": "20m",
+		"DB_CONNECT_TIMEOUT": "15s", "DB_TLS_MODE": "verify-ca", "DB_TLS_ROOT_CERT": "/env/postgres-ca.crt",
 		"AGENT_VAULT_MAX_REQUEST_BYTES": "3000", "AGENT_VAULT_MAX_RESPONSE_BYTES": "1500",
 		"AGENT_VAULT_ALLOW_PRIVATE_RANGES": "false", "AGENT_VAULT_NETWORK_ALLOWLIST": "172.16.0.0/12",
 		"AGENT_VAULT_TRUSTED_PROXIES":     "198.51.100.1",
@@ -313,6 +318,10 @@ func TestValidationErrors(t *testing.T) {
 		{"negative open", "[database]\nmax_open_conns=-1", "database.max_open_conns"},
 		{"idle exceeds open", "[database]\nmax_open_conns=1\nmax_idle_conns=2", "database.max_idle_conns"},
 		{"zero lifetime", "[database]\nconn_max_lifetime=\"0s\"", "database.conn_max_lifetime"},
+		{"zero connect timeout", "[database]\nconnect_timeout=\"0s\"", "database.connect_timeout"},
+		{"bad TLS mode", "[database]\ntls_mode=\"prefer\"", "database.tls_mode"},
+		{"verify full missing root", "[database]\ntls_mode=\"verify-full\"", "database.tls_root_cert"},
+		{"root without verification", "[database]\ntls_mode=\"require\"\ntls_root_cert=\"/ca.crt\"", "database.tls_root_cert"},
 		{"zero request bytes", "[proxy]\nmax_request_bytes=0", "proxy.max_request_bytes"},
 		{"negative response bytes", "[proxy]\nmax_response_bytes=-1", "proxy.max_response_bytes"},
 		{"empty allowlist entry", "[proxy]\nnetwork_allowlist=[\"\"]", "proxy.network_allowlist"},
@@ -371,6 +380,8 @@ func allFlagOverrides() Partial {
 	smtpHost, smtpPort, smtpUsername := "smtp.flag.example", 4465, "flag-user"
 	smtpFrom, smtpFromName, smtpTLSMode, smtpSkipVerify := "vault@flag.example", "Flag Vault", "required", true
 	lifetime := Duration(30 * time.Minute)
+	connectTimeout := Duration(25 * time.Second)
+	dbTLSMode, dbTLSRootCert := "verify-full", "/flag/postgres-ca.crt"
 	requestBytes, responseBytes, private := int64(4000), int64(2500), true
 	allowlist, proxies := []string{"10.10.0.0/16"}, []string{"203.0.113.1"}
 	authMode, authSocket := "spiffe", "unix:///flag/auth-spire.sock"
@@ -383,11 +394,14 @@ func allFlagOverrides() Partial {
 	return Partial{
 		SchemaVersion: &version,
 		Server:        PartialServer{Host: &host, Port: &port, ProxyPort: &proxyPort, ExternalAddress: &external, LogLevel: &level, Detach: &detach},
-		Database:      PartialDatabase{URL: &dbURL, SQLitePath: &sqlitePath, MaxOpenConns: &open, MaxIdleConns: &idle, ConnMaxLifetime: &lifetime},
-		Proxy:         PartialProxy{MaxRequestBytes: &requestBytes, MaxResponseBytes: &responseBytes, AllowPrivateRanges: &private, NetworkAllowlist: &allowlist, TrustedProxies: &proxies},
-		Auth:          PartialAuth{Mode: &authMode, WorkloadAPI: &authSocket, TrustDomains: &authDomains, BootstrapOwnerIDs: &bootstrapOwners},
-		Client:        PartialClient{Address: &address, Vault: &vault, WorkloadAPI: &socket, TrustDomains: &trustDomains},
-		Encryption:    PartialEncryption{LegacyMasterPassword: &masterPassword},
+		Database: PartialDatabase{
+			URL: &dbURL, SQLitePath: &sqlitePath, MaxOpenConns: &open, MaxIdleConns: &idle,
+			ConnMaxLifetime: &lifetime, ConnectTimeout: &connectTimeout, TLSMode: &dbTLSMode, TLSRootCert: &dbTLSRootCert,
+		},
+		Proxy:      PartialProxy{MaxRequestBytes: &requestBytes, MaxResponseBytes: &responseBytes, AllowPrivateRanges: &private, NetworkAllowlist: &allowlist, TrustedProxies: &proxies},
+		Auth:       PartialAuth{Mode: &authMode, WorkloadAPI: &authSocket, TrustDomains: &authDomains, BootstrapOwnerIDs: &bootstrapOwners},
+		Client:     PartialClient{Address: &address, Vault: &vault, WorkloadAPI: &socket, TrustDomains: &trustDomains},
+		Encryption: PartialEncryption{LegacyMasterPassword: &masterPassword},
 		SMTP: PartialSMTP{
 			Host: &smtpHost, Port: &smtpPort, Username: &smtpUsername, Password: &smtpPassword,
 			From: &smtpFrom, FromName: &smtpFromName, TLSMode: &smtpTLSMode, TLSSkipVerify: &smtpSkipVerify,
@@ -399,7 +413,7 @@ func allFlagOverrides() Partial {
 }
 
 func flagRuntime() Runtime {
-	return Runtime{
+	result := Runtime{
 		SchemaVersion: 1,
 		Server:        Server{Host: "flag-host", Port: 44321, ProxyPort: 44322, ExternalAddress: "https://flag.example", LogLevel: "debug", Detach: true},
 		Database:      Database{URL: secretValue("env://FLAG_DATABASE_URL", "postgres://flag/db"), MaxOpenConns: 60, MaxIdleConns: 40, ConnMaxLifetime: 30 * time.Minute},
@@ -416,6 +430,10 @@ func flagRuntime() Runtime {
 		RateLimit: RateLimit{Profile: "off", Locked: true},
 		Telemetry: Telemetry{Enabled: false},
 	}
+	result.Database.ConnectTimeout = 25 * time.Second
+	result.Database.TLSMode = "verify-full"
+	result.Database.TLSRootCert = "/flag/postgres-ca.crt"
+	return result
 }
 
 func discoveryEnv(configPath string) LookupEnv {

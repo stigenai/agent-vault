@@ -163,7 +163,8 @@ func openRecoveryRuntime(ctx context.Context, path string) (*recoveryRuntime, er
 	db, err := store.OpenStore(store.StoreConfig{
 		DatabaseURL: databaseURL, SQLitePath: cfg.Database.SQLitePath,
 		MaxOpenConns: cfg.Database.MaxOpenConns, MaxIdleConns: cfg.Database.MaxIdleConns,
-		ConnMaxLifetime: cfg.Database.ConnMaxLifetime, PoolConfigured: true,
+		ConnMaxLifetime: cfg.Database.ConnMaxLifetime, ConnectTimeout: cfg.Database.ConnectTimeout,
+		TLSMode: cfg.Database.TLSMode, TLSRootCert: cfg.Database.TLSRootCert, PoolConfigured: true,
 	})
 	cfg.Database.URL.Wipe()
 	cfg.Encryption.LegacyMasterPassword.Wipe()

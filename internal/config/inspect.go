@@ -49,6 +49,12 @@ func inspectValue(c Runtime, name string) interface{} {
 		return c.Database.MaxIdleConns
 	case "database.conn_max_lifetime":
 		return c.Database.ConnMaxLifetime.String()
+	case "database.connect_timeout":
+		return c.Database.ConnectTimeout.String()
+	case "database.tls_mode":
+		return c.Database.TLSMode
+	case "database.tls_root_cert":
+		return c.Database.TLSRootCert
 	case "proxy.max_request_bytes":
 		return c.Proxy.MaxRequestBytes
 	case "proxy.max_response_bytes":

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,9 @@ type StoreConfig struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+	ConnectTimeout  time.Duration
+	TLSMode         string
+	TLSRootCert     string
 	PoolConfigured  bool
 }
 
@@ -52,8 +56,21 @@ func RedactURL(rawURL string) string {
 	if err != nil {
 		return "***"
 	}
-	if _, has := u.User.Password(); has {
-		u.User = url.UserPassword(u.User.Username(), "***")
+	if u.User != nil {
+		if _, has := u.User.Password(); has {
+			u.User = url.UserPassword(u.User.Username(), "***")
+		}
+	}
+	query := u.Query()
+	redacted := false
+	for key := range query {
+		if strings.EqualFold(key, "password") {
+			query.Set(key, "***")
+			redacted = true
+		}
+	}
+	if redacted {
+		u.RawQuery = query.Encode()
 	}
 	return u.String()
 }

@@ -13,6 +13,9 @@ url = "file:///var/run/secrets/agent-vault/database-url"
 max_open_conns = 25
 max_idle_conns = 10
 conn_max_lifetime = "5m"
+connect_timeout = "10s"
+tls_mode = "verify-full"
+tls_root_cert = "/var/run/secrets/agent-vault/postgres-ca.crt"
 
 [proxy]
 max_request_bytes = 1073741824

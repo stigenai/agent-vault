@@ -34,9 +34,10 @@ spec:
         - name: secrets
           secret:
             secretName: agent-vault-secrets
-            items:
-              - {key: database-url, path: database-url}
-              - {key: master-password, path: master-password}
+          items:
+            - {key: database-url, path: database-url}
+            - {key: master-password, path: master-password}
+            - {key: postgres-ca.crt, path: postgres-ca.crt}
         - name: spire-agent-socket
           hostPath:
             path: /run/spire/sockets

@@ -31,6 +31,10 @@ For fleet deployments, these variables can be migrated incrementally to a valida
 | `DB_MAX_IDLE_CONNS` | Optional (defaults to `10`) | Maximum number of idle Postgres connections kept in the pool per instance. Only applies when `DATABASE_URL` is set. See [connection pooling](/self-hosting/postgres#operational-notes). |
 | `DB_CONN_MAX_LIFETIME` | Optional (defaults to `5m`) | Maximum lifetime of a Postgres connection before it is closed and replaced. Go duration string (e.g. `5m`, `1h`). Only applies when `DATABASE_URL` is set. See [connection pooling](/self-hosting/postgres#operational-notes). |
 
+| `DB_CONNECT_TIMEOUT` | Optional (defaults to `10s`) | PostgreSQL startup connection timeout. Accepts `1s` through `1m`. |
+| `DB_TLS_MODE` | Optional | PostgreSQL TLS policy: `disable`, `require`, `verify-ca`, or `verify-full`. Use `verify-full` in production. |
+| `DB_TLS_ROOT_CERT` | Required with verified TLS | Absolute path to the PostgreSQL CA bundle when `DB_TLS_MODE` is `verify-ca` or `verify-full`. |
+
 ## Email SMTP configuration
 
 Configure SMTP to enable Agent Vault to send emails for verification codes, vault invites, and notifications.

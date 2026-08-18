@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -74,6 +75,9 @@ type Database struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+	ConnectTimeout  time.Duration
+	TLSMode         string
+	TLSRootCert     string
 }
 
 type Proxy struct {
@@ -210,6 +214,9 @@ type PartialDatabase struct {
 	MaxOpenConns    *int       `toml:"max_open_conns"`
 	MaxIdleConns    *int       `toml:"max_idle_conns"`
 	ConnMaxLifetime *Duration  `toml:"conn_max_lifetime"`
+	ConnectTimeout  *Duration  `toml:"connect_timeout"`
+	TLSMode         *string    `toml:"tls_mode"`
+	TLSRootCert     *string    `toml:"tls_root_cert"`
 }
 
 type PartialProxy struct {
@@ -294,6 +301,7 @@ func Defaults() Runtime {
 			MaxOpenConns:    25,
 			MaxIdleConns:    10,
 			ConnMaxLifetime: 5 * time.Minute,
+			ConnectTimeout:  10 * time.Second,
 		},
 		Proxy: Proxy{
 			MaxRequestBytes: 1 << 30,
@@ -319,7 +327,7 @@ func Defaults() Runtime {
 var fieldNames = []string{
 	"schema_version",
 	"server.host", "server.port", "server.proxy_port", "server.external_address", "server.log_level", "server.detach",
-	"database.url", "database.sqlite_path", "database.max_open_conns", "database.max_idle_conns", "database.conn_max_lifetime",
+	"database.url", "database.sqlite_path", "database.max_open_conns", "database.max_idle_conns", "database.conn_max_lifetime", "database.connect_timeout", "database.tls_mode", "database.tls_root_cert",
 	"proxy.max_request_bytes", "proxy.max_response_bytes", "proxy.allow_private_ranges", "proxy.network_allowlist", "proxy.trusted_proxies",
 	"auth.mode", "auth.workload_api", "auth.trust_domains", "auth.bootstrap_owner_ids",
 	"client.address", "client.vault", "client.workload_api", "client.trust_domains",
@@ -373,6 +381,29 @@ func (c Runtime) Validate() error {
 	}
 	if c.Database.ConnMaxLifetime <= 0 {
 		return fmt.Errorf("database.conn_max_lifetime: must be greater than 0")
+	}
+	if c.Database.ConnectTimeout < time.Second || c.Database.ConnectTimeout > time.Minute {
+		return fmt.Errorf("database.connect_timeout: must be between 1s and 1m")
+	}
+	if c.Database.URL.IsSet() {
+		if c.Database.MaxOpenConns < 1 || c.Database.MaxOpenConns > 1000 {
+			return fmt.Errorf("database.max_open_conns: must be between 1 and 1000 for PostgreSQL")
+		}
+		if c.Database.ConnMaxLifetime < 30*time.Second || c.Database.ConnMaxLifetime > 24*time.Hour {
+			return fmt.Errorf("database.conn_max_lifetime: must be between 30s and 24h for PostgreSQL")
+		}
+	}
+	switch c.Database.TLSMode {
+	case "", "disable", "require":
+		if c.Database.TLSRootCert != "" {
+			return fmt.Errorf("database.tls_root_cert: requires tls_mode verify-ca or verify-full")
+		}
+	case "verify-ca", "verify-full":
+		if !filepath.IsAbs(c.Database.TLSRootCert) {
+			return fmt.Errorf("database.tls_root_cert: absolute path required for tls_mode %s", c.Database.TLSMode)
+		}
+	default:
+		return fmt.Errorf("database.tls_mode: accepted values are disable, require, verify-ca, verify-full")
 	}
 	if c.Proxy.MaxRequestBytes <= 0 {
 		return fmt.Errorf("proxy.max_request_bytes: must be greater than 0")
