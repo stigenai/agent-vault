@@ -2,11 +2,18 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: agent-vault-reconciler
+  labels:
+    app.kubernetes.io/name: agent-vault
+    app.kubernetes.io/component: reconciler
+automountServiceAccountToken: false
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: agent-vault-reconciler
+  labels:
+    app.kubernetes.io/name: agent-vault
+    app.kubernetes.io/component: reconciler
 spec:
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
@@ -15,13 +22,23 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
       template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: agent-vault
+            app.kubernetes.io/component: reconciler
         spec:
           serviceAccountName: agent-vault-reconciler
+          automountServiceAccountToken: false
           restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: reconcile
-              image: ghcr.io/stigenai/agent-vault:latest
+              image: ghcr.io/stigenai/agent-vault:v0.39.1
               args:
                 - config
                 - apply
@@ -31,8 +48,8 @@ spec:
                 - --file
                 - /etc/agent-vault/desired/environment.toml
               env:
-                - name: AGENT_VAULT_CONFIG
-                  value: /etc/agent-vault/server.toml
+                - {name: AGENT_VAULT_CONFIG, value: /etc/agent-vault/server.toml}
+                - {name: HOME, value: /tmp/agent-vault}
               volumeMounts:
                 - name: runtime-config
                   mountPath: /etc/agent-vault/server.toml
@@ -44,6 +61,17 @@ spec:
                 - name: spire-agent-socket
                   mountPath: /run/spire/sockets
                   readOnly: true
+                - name: runtime-data
+                  mountPath: /tmp/agent-vault
+              securityContext:
+                runAsUser: 65532
+                runAsGroup: 65532
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+                readOnlyRootFilesystem: true
+              resources:
+                requests: {cpu: 50m, memory: 64Mi}
+                limits: {cpu: 500m, memory: 256Mi}
           volumes:
             - name: runtime-config
               configMap:
@@ -52,6 +80,9 @@ spec:
               configMap:
                 name: agent-vault-fleet-desired
             - name: spire-agent-socket
-              hostPath:
-                path: /run/spire/sockets
-                type: Directory
+              csi:
+                driver: csi.spiffe.io
+                readOnly: true
+            - name: runtime-data
+              emptyDir:
+                sizeLimit: 32Mi

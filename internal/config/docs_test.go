@@ -52,7 +52,7 @@ func TestKubernetesFleetExamplesParseAndConfigValidates(t *testing.T) {
 		Resolver: Resolver{ReadFile: func(path string, _ int64) ([]byte, error) {
 			switch path {
 			case "/var/run/secrets/agent-vault/database-url":
-				return []byte("postgres://agentvault:example@postgres.example/agentvault?sslmode=require"), nil
+				return []byte("postgres://agentvault:example@postgres.example/agentvault"), nil
 			case "/var/run/secrets/agent-vault/master-password":
 				return []byte("example-master-password"), nil
 			default:
@@ -74,6 +74,7 @@ func TestKubernetesFleetExamplesParseAndConfigValidates(t *testing.T) {
 	defer manifest.Close()
 	decoder := yaml.NewDecoder(manifest)
 	documents := 0
+	kinds := make(map[string]bool)
 	for {
 		var value map[string]interface{}
 		err := decoder.Decode(&value)
@@ -85,10 +86,13 @@ func TestKubernetesFleetExamplesParseAndConfigValidates(t *testing.T) {
 		}
 		if len(value) > 0 {
 			documents++
+			if kind, ok := value["kind"].(string); ok {
+				kinds[kind] = true
+			}
 		}
 	}
-	if documents != 1 {
-		t.Fatalf("deployment documents = %d, want 1", documents)
+	if documents != 2 || !kinds["ServiceAccount"] || !kinds["Deployment"] {
+		t.Fatalf("deployment documents = %d, kinds = %v", documents, kinds)
 	}
 	kustomization, err := os.ReadFile(filepath.Join(root, "examples", "kubernetes", "fleet", "kustomization.yaml"))
 	if err != nil {

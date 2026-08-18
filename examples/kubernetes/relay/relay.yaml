@@ -42,7 +42,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent-vault-relay
-          image: ghcr.io/stigenai/agent-vault:latest
+          image: ghcr.io/stigenai/agent-vault:v0.39.1
           args: ["relay", "--config", "/etc/agent-vault/relay.toml"]
           ports:
             - {name: relay, containerPort: 14322}

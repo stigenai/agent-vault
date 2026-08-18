@@ -1,9 +1,13 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: agent-vault
 resources:
+  - namespace.yaml
   - deployment.yaml
   - service.yaml
   - reconciler.yaml
+  - pod-disruption-budget.yaml
+  - network-policies.yaml
 configMapGenerator:
   - name: agent-vault-config
     files:

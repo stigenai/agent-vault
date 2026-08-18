@@ -40,10 +40,10 @@ legacy_master_password = "file:///var/run/secrets/agent-vault/master-password"
 
 # Fleet secret-provider examples. Uncomment only providers configured for the
 # cluster; references in desired-state TOML select these names.
-# [[secret_providers]]
-# name = "aws-production"
-# kind = "aws-secrets-manager"
-# region = "us-east-1"
+[[secret_providers]]
+name = "aws-production"
+kind = "aws-secrets-manager"
+region = "us-east-1"
 
 # [[secret_providers]]
 # name = "bao-production"

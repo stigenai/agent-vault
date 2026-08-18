@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/stigenai/example-agent:latest
+          image: ghcr.io/stigenai/example-agent:v1.0.0
           env:
             - {name: HTTPS_PROXY, value: "http://example-agent-relay:14322"}
             - {name: HTTP_PROXY, value: "http://example-agent-relay:14322"}

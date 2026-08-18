@@ -2,9 +2,13 @@ apiVersion: v1
 kind: Service
 metadata:
   name: agent-vault
+  labels:
+    app.kubernetes.io/name: agent-vault
+    app.kubernetes.io/component: broker
 spec:
   selector:
-    app: agent-vault
+    app.kubernetes.io/name: agent-vault
+    app.kubernetes.io/component: broker
   ports:
     - name: api
       port: 443
