@@ -111,6 +111,8 @@ func inspectValue(c Runtime, name string) interface{} {
 		return c.RateLimit.Locked
 	case "telemetry.enabled":
 		return c.Telemetry.Enabled
+	case "telemetry.metrics_enabled":
+		return c.Telemetry.MetricsEnabled
 	case "secret_providers":
 		providers := make([]map[string]interface{}, 0, len(c.SecretProviders))
 		for _, provider := range c.SecretProviders {

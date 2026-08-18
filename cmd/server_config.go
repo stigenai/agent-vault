@@ -110,6 +110,7 @@ func resolvedServerOptions(cfg runtimeconfig.Runtime) server.RuntimeOptions {
 		NetworkAllowlist:   parseNetworkList(cfg.Proxy.NetworkAllowlist, "proxy.network_allowlist"),
 		TrustedProxies:     parseNetworkList(cfg.Proxy.TrustedProxies, "proxy.trusted_proxies"),
 		AuthMode:           cfg.Auth.Mode,
+		MetricsEnabled:     cfg.Telemetry.MetricsEnabled,
 	}
 }
 

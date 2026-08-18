@@ -117,6 +117,12 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if plan.Blocked || digest != request.ExpectedPlanSHA256 {
+		if s.metrics != nil {
+			s.metrics.RecordFleetApply("conflict")
+		}
+		s.logger.Warn("fleet reconcile rejected",
+			"event", "fleet_reconcile", "outcome", "conflict",
+			"planned_conflicts", plan.Summary.Conflict)
 		jsonStatus(w, http.StatusConflict, map[string]any{
 			"error": "Fleet plan changed or has unmet prerequisites", "plan_sha256": digest, "plan": plan,
 		})
@@ -140,6 +146,16 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 			if errors.As(err, &conflict) || errors.Is(err, sql.ErrNoRows) {
 				status, code = http.StatusConflict, "revision_conflict"
 			}
+			if s.metrics != nil {
+				if status == http.StatusConflict {
+					s.metrics.RecordFleetApply("conflict")
+				} else {
+					s.metrics.RecordFleetApply("failure")
+				}
+			}
+			s.logger.Warn("fleet reconcile failed",
+				"event", "fleet_reconcile", "outcome", code,
+				"applied_operations", len(response.Applied))
 			jsonStatus(w, status, map[string]any{
 				"error": code, "failed_resource": operation.Resource, "applied": response.Applied,
 			})
@@ -149,6 +165,12 @@ func (s *Server) handleFleetApply(w http.ResponseWriter, r *http.Request) {
 			Resource: operation.Resource, Action: operation.Action, Status: "applied",
 		})
 	}
+	if s.metrics != nil {
+		s.metrics.RecordFleetApply("success")
+	}
+	s.logger.Info("fleet reconcile complete",
+		"event", "fleet_reconcile", "outcome", "success",
+		"applied_operations", len(response.Applied))
 	jsonOK(w, response)
 }
 

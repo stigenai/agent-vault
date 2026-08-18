@@ -218,6 +218,7 @@ var serverCmd = &cobra.Command{
 			srv.AttachReadinessCheck("workload identity unavailable", func(context.Context) error {
 				return identitySource.Ready()
 			})
+			srv.AttachMetricsIdentity(identitySource)
 		}
 		srv.SetSkills(skillCLI)
 		if cfg.Telemetry.Enabled {
@@ -718,6 +719,7 @@ func runDetachedChild(cfg runtimeconfig.Runtime, addr string, logger *slog.Logge
 		srv.AttachReadinessCheck("workload identity unavailable", func(context.Context) error {
 			return identitySource.Ready()
 		})
+		srv.AttachMetricsIdentity(identitySource)
 	}
 	srv.SetSkills(skillCLI)
 	if cfg.Telemetry.Enabled {

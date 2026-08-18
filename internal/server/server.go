@@ -28,6 +28,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/netguard"
 	"github.com/Infisical/agent-vault/internal/notify"
 	"github.com/Infisical/agent-vault/internal/oauth"
+	"github.com/Infisical/agent-vault/internal/observability"
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
@@ -103,6 +104,8 @@ type Server struct {
 	infisicalDynamic *infisical.DynamicResolver
 	oauthRefresher   *oauth.Refresher
 	telemetry        *telemetry.Telemetry
+	metrics          *observability.Registry
+	metricsIdentity  *workloadidentity.Source
 }
 
 type readinessCheck struct {
@@ -159,6 +162,12 @@ func (s *Server) AttachReadinessCheck(failure string, check func(context.Context
 		return
 	}
 	s.readinessChecks = append(s.readinessChecks, readinessCheck{failure: failure, check: check})
+}
+
+// AttachMetricsIdentity exposes only current SVID validity and expiry. Exact
+// SPIFFE IDs and certificate material are intentionally never exported.
+func (s *Server) AttachMetricsIdentity(source *workloadidentity.Source) {
+	s.metricsIdentity = source
 }
 
 // AttachLogSink swaps the per-request log sink. Safe to call once at
@@ -858,8 +867,9 @@ type RuntimeOptions struct {
 	TrustedProxies     []net.IPNet
 	// TLSConfig enables TLS on the API listener. SPIFFE deployments supply a
 	// rotating mTLS config from workloadidentity.Source.
-	TLSConfig *tls.Config
-	AuthMode  string
+	TLSConfig      *tls.Config
+	AuthMode       string
+	MetricsEnabled bool
 }
 
 func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
@@ -914,6 +924,9 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 		logSink:           requestlog.Nop{},
 		oauthRefresher:    oauth.NewRefresher(),
 	}
+	if opts.MetricsEnabled {
+		s.metrics = observability.New()
+	}
 
 	// Apply SSRF protection to OAuth token endpoint requests.
 	oauthTransport := http.DefaultTransport.(*http.Transport).Clone()
@@ -937,6 +950,9 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("POST /v1/auth/reset-password", s.requireLegacyAuth(ipAuth(limitBody(s.handleResetPassword))))
 
 	actorAuthed := s.tier(ratelimit.TierAuthed, s.actorKeyer())
+	if s.metrics != nil {
+		mux.HandleFunc("GET /metrics", s.requireInitialized(s.requireAuth(actorAuthed(s.handleMetrics))))
+	}
 
 	// Require initialization
 	mux.HandleFunc("GET /v1/auth/me", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAuthMe))))
@@ -1169,6 +1185,10 @@ func (s *Server) Start() error {
 	pruneCtx, stopWorkers := context.WithCancel(context.Background())
 	defer stopWorkers()
 	go s.runTouchCachePruner(pruneCtx)
+	if s.metrics != nil {
+		s.logger.Info("DEK unwrap ready", slog.String("event", "dek_unwrap"), slog.String("outcome", "ready"))
+		go s.runIdentityObservability(pruneCtx)
+	}
 
 	// syncerDone closes once Syncer.Run has returned AND drained its in-flight
 	// refresh goroutines. We block on it before WipeBytes so a refresh mid-
@@ -1191,12 +1211,22 @@ func (s *Server) Start() error {
 		go func() {
 			defer close(refreshDone)
 			_ = s.secretRefresh.Run(pruneCtx, 10*time.Second, func(stats secretrefresh.Stats, err error) {
+				if s.metrics != nil {
+					s.metrics.RecordRefreshCycle(stats.Failed, err)
+				}
 				if err != nil && !errors.Is(err, context.Canceled) {
-					s.logger.Warn("secret refresh cycle failed", slog.String("code", "scheduler_error"))
+					s.logger.Warn("secret refresh cycle failed",
+						slog.String("event", "secret_refresh"),
+						slog.String("outcome", "scheduler_error"))
 					return
 				}
 				if stats.Claimed > 0 {
-					s.logger.Debug("secret refresh cycle", slog.Int("claimed", stats.Claimed), slog.Int("updated", stats.Updated), slog.Int("failed", stats.Failed))
+					s.logger.Debug("secret refresh cycle",
+						slog.String("event", "secret_refresh"),
+						slog.String("outcome", "complete"),
+						slog.Int("claimed", stats.Claimed),
+						slog.Int("updated", stats.Updated),
+						slog.Int("failed", stats.Failed))
 				}
 			})
 		}()

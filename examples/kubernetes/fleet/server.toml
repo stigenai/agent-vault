@@ -70,3 +70,4 @@ locked = true
 
 [telemetry]
 enabled = false
+metrics_enabled = true

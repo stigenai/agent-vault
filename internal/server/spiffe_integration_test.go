@@ -60,9 +60,10 @@ func TestSPIFFEOnlyListenerDowngradeRoleRotationAndRevocation(t *testing.T) {
 		},
 	}
 	srv := NewWithRuntime("127.0.0.1:0", ms, make([]byte, 32), nil, true, "https://vault.test", slog.New(slog.DiscardHandler), RuntimeOptions{
-		TLSConfig: serverTLS,
-		AuthMode:  "spiffe",
-		RateLimit: ratelimit.DefaultsFor(ratelimit.ProfileOff),
+		TLSConfig:      serverTLS,
+		AuthMode:       "spiffe",
+		RateLimit:      ratelimit.DefaultsFor(ratelimit.ProfileOff),
+		MetricsEnabled: true,
 	})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -121,6 +122,12 @@ func TestSPIFFEOnlyListenerDowngradeRoleRotationAndRevocation(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("owner route status=%d body=%s", resp.StatusCode, body)
+	}
+	closeIntegrationResponse(resp)
+	resp = integrationRequest(t, ownerClient, http.MethodGet, baseURL+"/metrics", "")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("SPIFFE-authenticated metrics status=%d body=%s", resp.StatusCode, body)
 	}
 	closeIntegrationResponse(resp)
 

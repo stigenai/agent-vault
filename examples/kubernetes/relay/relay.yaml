@@ -15,6 +15,7 @@ spec:
     agent-vault.stigen.ai/role: relay
   ports:
     - {name: relay, port: 14322, targetPort: relay}
+    - {name: metrics, port: 9464, targetPort: metrics}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,6 +47,7 @@ spec:
           args: ["relay", "--config", "/etc/agent-vault/relay.toml"]
           ports:
             - {name: relay, containerPort: 14322}
+            - {name: metrics, containerPort: 9464}
           volumeMounts:
             - {name: relay-config, mountPath: /etc/agent-vault, readOnly: true}
             - {name: spire-agent-socket, mountPath: /run/spire/sockets, readOnly: true}

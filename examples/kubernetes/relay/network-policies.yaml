@@ -54,6 +54,25 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: example-agent-relay-metrics-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent-relay
+      agent-vault.stigen.ai/identity: example-agent
+      agent-vault.stigen.ai/role: relay
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agent-vault.stigen.ai/metrics-scrapers: "true"
+      ports:
+        - {protocol: TCP, port: 9464}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: example-agent-relay-default-deny
 spec:
   podSelector:

@@ -32,6 +32,8 @@ type Options struct {
 	RequestLineLimit     int
 	ConnectTimeout       time.Duration
 	AllowNetworkListener bool
+	OnDialResult         func(bool)
+	OnConnection         func(int64)
 }
 
 type Relay struct {
@@ -40,6 +42,8 @@ type Relay struct {
 	lineLimit            int
 	connectTimeout       time.Duration
 	allowNetworkListener bool
+	onDialResult         func(bool)
+	onConnection         func(int64)
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -81,6 +85,8 @@ func New(opts Options) (*Relay, error) {
 		lineLimit:            lineLimit,
 		connectTimeout:       connectTimeout,
 		allowNetworkListener: opts.AllowNetworkListener,
+		onDialResult:         opts.OnDialResult,
+		onConnection:         opts.OnConnection,
 		conns:                make(map[net.Conn]struct{}),
 		dialCtx:              dialCtx,
 		cancel:               cancel,
@@ -181,8 +187,14 @@ func (r *Relay) serveConn(local net.Conn) {
 	remote, err := r.dial(dialCtx, "tcp", r.remoteAddr)
 	cancelDial()
 	if err != nil {
+		if r.onDialResult != nil {
+			r.onDialResult(false)
+		}
 		writeError(local, 502, "central proxy unavailable")
 		return
+	}
+	if r.onDialResult != nil {
+		r.onDialResult(true)
 	}
 	if !r.track(remote) {
 		_ = remote.Close()
@@ -191,6 +203,10 @@ func (r *Relay) serveConn(local net.Conn) {
 	}
 	defer r.untrack(remote)
 	defer remote.Close()
+	if r.onConnection != nil {
+		r.onConnection(1)
+		defer r.onConnection(-1)
+	}
 
 	clientToRemote := io.MultiReader(bytes.NewReader(line), reader)
 	done := make(chan struct{}, 2)

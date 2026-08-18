@@ -21,14 +21,15 @@ url = "file:///must-not-be-read"
 	cfg, err := LoadRelay(ClientOptions{
 		Path: path,
 		LookupEnv: mapEnv(map[string]string{
-			"AGENT_VAULT_RELAY_LISTEN":        "0.0.0.0:16000",
-			"AGENT_VAULT_RELAY_LISTENER_MODE": "network",
+			"AGENT_VAULT_RELAY_LISTEN":          "0.0.0.0:16000",
+			"AGENT_VAULT_RELAY_LISTENER_MODE":   "network",
+			"AGENT_VAULT_RELAY_METRICS_ADDRESS": "0.0.0.0:9464",
 		}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Relay.ListenAddress != "0.0.0.0:16000" || cfg.Relay.RemoteAddress != "vault-proxy.example:443" || cfg.Relay.ListenerMode != "network" {
+	if cfg.Relay.ListenAddress != "0.0.0.0:16000" || cfg.Relay.RemoteAddress != "vault-proxy.example:443" || cfg.Relay.ListenerMode != "network" || cfg.Relay.MetricsAddress != "0.0.0.0:9464" {
 		t.Fatalf("relay config = %#v", cfg.Relay)
 	}
 	if cfg.Client.WorkloadAPI != "unix:///run/spire/agent.sock" {
@@ -49,6 +50,8 @@ func TestValidateRelayFailsClosed(t *testing.T) {
 		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "proxy.example:443"},
 		{ListenAddress: "127.0.0.1:14322", ListenerMode: "loopback"},
 		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "https://proxy.example", ListenerMode: "loopback"},
+		{ListenAddress: "127.0.0.1:14322", RemoteAddress: "proxy.example:443", ListenerMode: "loopback", MetricsAddress: "0.0.0.0:9464"},
+		{ListenAddress: "0.0.0.0:14322", RemoteAddress: "proxy.example:443", ListenerMode: "network", MetricsAddress: "metrics.example:9464"},
 	} {
 		if err := ValidateRelay(relay); err == nil {
 			t.Fatalf("invalid relay accepted: %#v", relay)

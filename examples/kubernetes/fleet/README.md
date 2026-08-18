@@ -78,6 +78,12 @@ Label namespaces allowed to call the control API:
 kubectl label namespace platform-operators agent-vault.stigen.ai/control-plane-client=true
 ```
 
+Label the namespace containing the SPIFFE-aware metrics collector separately:
+
+```bash
+kubectl label namespace monitoring agent-vault.stigen.ai/metrics-scrapers=true
+```
+
 Relay namespaces require `agent-vault.stigen.ai/relay-clients=true`; the included `agents` Namespace already has it. Broker ingress is default-denied except API traffic from labeled operator namespaces or the reconciler and proxy traffic from labeled relay namespaces. Reconciler ingress and egress are default-denied except DNS and the broker API.
 
 Broker egress remains unrestricted in the portable base because PostgreSQL and secret-provider destinations are installation-specific. Restrict it in an overlay with CNI FQDN policies, explicit provider CIDRs, private endpoints, or cloud security groups. Do not add direct agent-to-broker egress.
@@ -91,6 +97,8 @@ kubectl apply -k examples/kubernetes
 ```
 
 The broker's init container validates resolved TOML and mounted secret files before startup. Startup, readiness, and liveness use separate HTTPS endpoints; provider or PostgreSQL outages remove a pod from service without causing liveness restart loops.
+
+Operational Prometheus metrics are enabled on the authenticated API listener. The optional [`observability`](observability) overlay supplies bounded-cardinality alert rules and a Grafana dashboard. Give the monitoring collector its own rotating SVID and exact Agent Vault binding; do not use a durable scrape token.
 
 Before production, create an overlay that replaces `ghcr.io/stigenai/agent-vault:v0.39.1` with the exact digest built from this fork and adjusts replicas, resources, provider endpoints, trust domain, PostgreSQL capacity, and namespace selectors.
 

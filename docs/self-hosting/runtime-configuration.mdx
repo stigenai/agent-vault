@@ -117,6 +117,7 @@ All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP add
 | `rate_limit.profile` | `default` | `AGENT_VAULT_RATELIMIT_PROFILE` |
 | `rate_limit.locked` | `false` | `AGENT_VAULT_RATELIMIT_LOCK` |
 | `telemetry.enabled` | `true` | `AGENT_VAULT_TELEMETRY` / `--telemetry` |
+| `telemetry.metrics_enabled` | `false` | `AGENT_VAULT_METRICS_ENABLED` |
 
 Legacy `AGENT_VAULT_RATELIMIT_<TIER>_<KNOB>` variables remain supported for per-tier overrides. They are applied once during startup on top of `rate_limit.profile`; `rate_limit.locked = true` prevents instance-setting overrides.
 
@@ -169,9 +170,9 @@ For in-cluster operator commands, configure `client.address`, `client.workload_a
 
 ### Workload relay listener
 
-The relay's `[relay]` table accepts `listen_address`, `remote_address`, and `listener_mode`. `listener_mode` defaults to `loopback` and rejects non-loopback addresses. Set `listener_mode = "network"` only when the relay runs in a separate pod protected by default-deny NetworkPolicies; network mode rejects loopback addresses so a topology mismatch fails during startup. See the [Kubernetes relay example](https://github.com/stigenai/agent-vault/tree/main/examples/kubernetes/relay).
+The relay's `[relay]` table accepts `listen_address`, `remote_address`, `listener_mode`, and optional `metrics_address`. `listener_mode` defaults to `loopback` and rejects non-loopback addresses. Set `listener_mode = "network"` only when the relay runs in a separate pod protected by default-deny NetworkPolicies; network mode rejects loopback addresses so a topology mismatch fails during startup. A configured metrics listener uses SPIFFE mTLS and a non-loopback metrics address also requires network mode. See [Fleet observability](/self-hosting/observability) and the [Kubernetes relay example](https://github.com/stigenai/agent-vault/tree/main/examples/kubernetes/relay).
 
-`AGENT_VAULT_RELAY_LISTEN`, `AGENT_VAULT_RELAY_REMOTE`, and `AGENT_VAULT_RELAY_LISTENER_MODE` override those TOML fields for compatibility. Fleet deployments should keep the topology in TOML.
+`AGENT_VAULT_RELAY_LISTEN`, `AGENT_VAULT_RELAY_REMOTE`, `AGENT_VAULT_RELAY_LISTENER_MODE`, and `AGENT_VAULT_RELAY_METRICS_ADDRESS` override those TOML fields for compatibility. Fleet deployments should keep the topology in TOML.
 
 ## Kubernetes fleet example
 

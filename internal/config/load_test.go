@@ -73,6 +73,7 @@ locked = true
 
 [telemetry]
 enabled = false
+metrics_enabled = true
 `
 
 func TestDefaults(t *testing.T) {
@@ -142,7 +143,7 @@ func TestLoadFullTOMLAndSources(t *testing.T) {
 		},
 		Logs:      Logs{MaxAge: 48 * time.Hour, MaxRowsPerVault: 20000, RetentionLocked: true},
 		RateLimit: RateLimit{Profile: "strict", Locked: true},
-		Telemetry: Telemetry{Enabled: false},
+		Telemetry: Telemetry{Enabled: false, MetricsEnabled: true},
 	}
 	if !reflect.DeepEqual(got.Config, want) {
 		t.Fatalf("loaded config mismatch\n got: %#v\nwant: %#v", got.Config, want)
@@ -188,6 +189,7 @@ func TestLoadPrecedenceEveryField(t *testing.T) {
 		"AGENT_VAULT_LOGS_MAX_AGE_HOURS":   "72", "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT": "30000",
 		"AGENT_VAULT_LOGS_RETENTION_LOCK": "false", "AGENT_VAULT_RATELIMIT_PROFILE": "loose",
 		"AGENT_VAULT_RATELIMIT_LOCK": "false", "AGENT_VAULT_TELEMETRY": "true",
+		"AGENT_VAULT_METRICS_ENABLED": "false",
 	}
 
 	resolver := Resolver{ReadFile: func(string, int64) ([]byte, error) { return []byte("toml-smtp-password"), nil }}
@@ -390,7 +392,7 @@ func allFlagOverrides() Partial {
 	address, vault, socket := "https://flag-client.example", "flag-vault", "unix:///flag/spire.sock"
 	trustDomains := []string{"spiffe://flag.example"}
 	maxAge, rows, retention := Duration(96*time.Hour), int64(40000), true
-	profile, locked, telemetry := "off", true, false
+	profile, locked, telemetry, metrics := "off", true, false, true
 	return Partial{
 		SchemaVersion: &version,
 		Server:        PartialServer{Host: &host, Port: &port, ProxyPort: &proxyPort, ExternalAddress: &external, LogLevel: &level, Detach: &detach},
@@ -408,7 +410,7 @@ func allFlagOverrides() Partial {
 		},
 		Logs:      PartialLogs{MaxAge: &maxAge, MaxRowsPerVault: &rows, RetentionLocked: &retention},
 		RateLimit: PartialRateLimit{Profile: &profile, Locked: &locked},
-		Telemetry: PartialTelemetry{Enabled: &telemetry},
+		Telemetry: PartialTelemetry{Enabled: &telemetry, MetricsEnabled: &metrics},
 	}
 }
 
@@ -428,7 +430,7 @@ func flagRuntime() Runtime {
 		},
 		Logs:      Logs{MaxAge: 96 * time.Hour, MaxRowsPerVault: 40000, RetentionLocked: true},
 		RateLimit: RateLimit{Profile: "off", Locked: true},
-		Telemetry: Telemetry{Enabled: false},
+		Telemetry: Telemetry{Enabled: false, MetricsEnabled: true},
 	}
 	result.Database.ConnectTimeout = 25 * time.Second
 	result.Database.TLSMode = "verify-full"

@@ -9,3 +9,4 @@ trust_domains = ["spiffe://cluster.example"]
 listener_mode = "network"
 listen_address = "0.0.0.0:14322"
 remote_address = "agent-vault.agent-vault.svc.cluster.local:14322"
+metrics_address = "0.0.0.0:9464"

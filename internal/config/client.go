@@ -156,6 +156,9 @@ func LoadRelay(opts ClientOptions) (RelayClient, error) {
 			if partial.Relay.ListenerMode != nil {
 				result.Relay.ListenerMode = *partial.Relay.ListenerMode
 			}
+			if partial.Relay.MetricsAddress != nil {
+				result.Relay.MetricsAddress = *partial.Relay.MetricsAddress
+			}
 		}
 	}
 	if value, ok := lookup("AGENT_VAULT_RELAY_LISTEN"); ok && strings.TrimSpace(value) != "" {
@@ -166,6 +169,9 @@ func LoadRelay(opts ClientOptions) (RelayClient, error) {
 	}
 	if value, ok := lookup("AGENT_VAULT_RELAY_LISTENER_MODE"); ok && strings.TrimSpace(value) != "" {
 		result.Relay.ListenerMode = value
+	}
+	if value, ok := lookup("AGENT_VAULT_RELAY_METRICS_ADDRESS"); ok {
+		result.Relay.MetricsAddress = strings.TrimSpace(value)
 	}
 	return result, nil
 }
@@ -203,6 +209,18 @@ func ValidateRelay(relay Relay) error {
 	}
 	if port, err := strconv.Atoi(remotePort); err != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("relay.remote_address: invalid port")
+	}
+	if relay.MetricsAddress != "" {
+		metricsHost, metricsPort, err := net.SplitHostPort(relay.MetricsAddress)
+		if err != nil || net.ParseIP(metricsHost) == nil {
+			return fmt.Errorf("relay.metrics_address: expected explicit IP:port")
+		}
+		if port, err := strconv.Atoi(metricsPort); err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("relay.metrics_address: invalid port")
+		}
+		if !net.ParseIP(metricsHost).IsLoopback() && relay.ListenerMode != "network" {
+			return fmt.Errorf("relay.metrics_address: non-loopback metrics require listener_mode network")
+		}
 	}
 	return nil
 }

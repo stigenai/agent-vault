@@ -104,9 +104,10 @@ type Client struct {
 }
 
 type Relay struct {
-	ListenAddress string
-	RemoteAddress string
-	ListenerMode  string
+	ListenAddress  string
+	RemoteAddress  string
+	ListenerMode   string
+	MetricsAddress string
 }
 
 type SecretProviderConfig struct {
@@ -178,7 +179,8 @@ type RateLimit struct {
 }
 
 type Telemetry struct {
-	Enabled bool
+	Enabled        bool
+	MetricsEnabled bool
 }
 
 // Partial represents values supplied by one configuration layer. Pointers
@@ -242,9 +244,10 @@ type PartialClient struct {
 }
 
 type PartialRelay struct {
-	ListenAddress *string `toml:"listen_address"`
-	RemoteAddress *string `toml:"remote_address"`
-	ListenerMode  *string `toml:"listener_mode"`
+	ListenAddress  *string `toml:"listen_address"`
+	RemoteAddress  *string `toml:"remote_address"`
+	ListenerMode   *string `toml:"listener_mode"`
+	MetricsAddress *string `toml:"metrics_address"`
 }
 
 type PartialEncryption struct {
@@ -276,7 +279,8 @@ type PartialRateLimit struct {
 }
 
 type PartialTelemetry struct {
-	Enabled *bool `toml:"enabled"`
+	Enabled        *bool `toml:"enabled"`
+	MetricsEnabled *bool `toml:"metrics_enabled"`
 }
 
 // Result includes the effective configuration and source of every field.
@@ -335,7 +339,7 @@ var fieldNames = []string{
 	"smtp.host", "smtp.port", "smtp.username", "smtp.password", "smtp.from", "smtp.from_name", "smtp.tls_mode", "smtp.tls_skip_verify",
 	"logs.max_age", "logs.max_rows_per_vault", "logs.retention_locked",
 	"rate_limit.profile", "rate_limit.locked",
-	"telemetry.enabled",
+	"telemetry.enabled", "telemetry.metrics_enabled",
 }
 
 func defaultSources() map[string]Source {

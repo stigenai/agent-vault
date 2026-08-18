@@ -284,6 +284,54 @@ func TestRelayForcedShutdownCancelsActiveStream(t *testing.T) {
 	}
 }
 
+func TestRelayReportsBoundedConnectivitySignals(t *testing.T) {
+	remoteClient, remoteServer := net.Pipe()
+	defer remoteServer.Close()
+	dials := make(chan bool, 1)
+	connections := make(chan int64, 2)
+	r, err := New(Options{
+		RemoteAddr: "central:443",
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return remoteClient, nil
+		},
+		OnDialResult: func(success bool) { dials <- success },
+		OnConnection: func(delta int64) { connections <- delta },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Serve(listener) }()
+	local, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(local, "CONNECT service.example:443 HTTP/1.1\r\n\r\n")
+	if success := <-dials; !success {
+		t.Fatal("successful relay dial reported as failure")
+	}
+	if delta := <-connections; delta != 1 {
+		t.Fatalf("connection start delta = %d, want 1", delta)
+	}
+	_ = local.Close()
+	_ = remoteServer.Close()
+	if delta := <-connections; delta != -1 {
+		t.Fatalf("connection end delta = %d, want -1", delta)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := r.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRelayForcedShutdownCancelsPendingDial(t *testing.T) {
 	dialStarted := make(chan struct{})
 	dialCanceled := make(chan struct{})

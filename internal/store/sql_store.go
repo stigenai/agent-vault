@@ -905,6 +905,26 @@ func (s *SQLStore) ListCredentialSources(ctx context.Context, vaultID string) ([
 	return sources, rows.Err()
 }
 
+// ListAllCredentialSources supports one bounded observability query across a
+// fleet. The caller aggregates metadata only and never exports identifying
+// fields from the returned rows.
+func (s *SQLStore) ListAllCredentialSources(ctx context.Context) ([]CredentialSource, error) {
+	rows, err := s.db.QueryContext(ctx, credentialSourceSelect+` ORDER BY vault_id, credential_key`)
+	if err != nil {
+		return nil, fmt.Errorf("listing all credential sources: %w", err)
+	}
+	defer rows.Close()
+	var sources []CredentialSource
+	for rows.Next() {
+		source, err := s.scanCredentialSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, *source)
+	}
+	return sources, rows.Err()
+}
+
 func (s *SQLStore) DeleteCredentialSource(ctx context.Context, vaultID, credentialKey string) error {
 	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(
 		`DELETE FROM credential_sources WHERE vault_id = ? AND credential_key = ?`), vaultID, credentialKey)

@@ -18,6 +18,8 @@ kubectl -n agents create configmap agent-vault-mitm-ca --from-file=ca.pem
 kubectl apply -k examples/kubernetes/relay
 ```
 
+The relay also exposes SPIFFE-mTLS metrics on TCP 9464. Label only the monitoring collector namespace with `agent-vault.stigen.ai/metrics-scrapers=true`; the included NetworkPolicy permits that namespace to reach the metrics port while the agent remains limited to TCP 14322.
+
 The agent pod is default-denied and can reach only DNS and its matching relay on TCP 14322. The relay is independently default-denied and can receive traffic only from its matching agent, resolve DNS, and connect to the broker proxy port. If the broker namespace also has default-deny ingress, add a broker-side ingress policy selecting relay pods from namespaces explicitly labeled `agent-vault.stigen.ai/relay-clients=true`.
 
 `listener_mode = "network"` is a deliberate opt-in. The relay rejects a non-loopback listener unless this mode is set. Local CLI and non-Kubernetes deployments continue to default to `loopback`.

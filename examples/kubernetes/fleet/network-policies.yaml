@@ -30,6 +30,12 @@ spec:
               agent-vault.stigen.ai/control-plane-client: "true"
       ports:
         - {protocol: TCP, port: 14321}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agent-vault.stigen.ai/metrics-scrapers: "true"
+      ports:
+        - {protocol: TCP, port: 14321}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

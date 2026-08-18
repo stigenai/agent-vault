@@ -309,6 +309,9 @@ func applyEnvironment(result *Result, lookup LookupEnv) error {
 	if err := setBool("AGENT_VAULT_TELEMETRY", "telemetry.enabled", &result.Config.Telemetry.Enabled); err != nil {
 		return err
 	}
+	if err := setBool("AGENT_VAULT_METRICS_ENABLED", "telemetry.metrics_enabled", &result.Config.Telemetry.MetricsEnabled); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -519,6 +522,10 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 	if v := partial.Telemetry.Enabled; v != nil {
 		result.Config.Telemetry.Enabled = *v
 		set("telemetry.enabled")
+	}
+	if v := partial.Telemetry.MetricsEnabled; v != nil {
+		result.Config.Telemetry.MetricsEnabled = *v
+		set("telemetry.metrics_enabled")
 	}
 	if v := partial.SecretProviders; v != nil {
 		result.Config.SecretProviders = append([]SecretProviderConfig(nil), (*v)...)

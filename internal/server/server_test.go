@@ -128,6 +128,14 @@ func (m *mockStore) ListCredentialSources(_ context.Context, vaultID string) ([]
 	return sources, nil
 }
 
+func (m *mockStore) ListAllCredentialSources(context.Context) ([]store.CredentialSource, error) {
+	sources := make([]store.CredentialSource, 0, len(m.credentialSources))
+	for _, source := range m.credentialSources {
+		sources = append(sources, *source)
+	}
+	return sources, nil
+}
+
 func (m *mockStore) SetCredentialSource(_ context.Context, source store.CredentialSource) (*store.CredentialSource, error) {
 	if m.setCredentialSourceErr != nil {
 		return nil, m.setCredentialSourceErr

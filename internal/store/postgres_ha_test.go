@@ -363,6 +363,10 @@ func TestPostgresHARefreshClaimsSurviveConnectionLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	allSources, err := stores[1].ListAllCredentialSources(ctx)
+	if err != nil || len(allSources) != sourceCount {
+		t.Fatalf("fleet observability source inventory = %d, %v; want %d", len(allSources), err, sourceCount)
+	}
 
 	type claimResult struct {
 		worker  string

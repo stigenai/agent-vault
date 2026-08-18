@@ -151,10 +151,10 @@ func TestKubernetesRelayExampleUsesSeparateIsolatedPods(t *testing.T) {
 		t.Fatal(err)
 	}
 	policyText := string(policyBytes)
-	if got := strings.Count(policyText, "kind: NetworkPolicy"); got != 7 {
-		t.Fatalf("network policy count = %d, want 7", got)
+	if got := strings.Count(policyText, "kind: NetworkPolicy"); got != 8 {
+		t.Fatalf("network policy count = %d, want 8", got)
 	}
-	for _, required := range []string{"example-agent-default-deny", "example-agent-to-own-relay", "example-agent-relay-default-deny", "example-agent-relay-ingress", "example-agent-relay-to-broker", "kubernetes.io/metadata.name: agent-vault"} {
+	for _, required := range []string{"example-agent-default-deny", "example-agent-to-own-relay", "example-agent-relay-default-deny", "example-agent-relay-ingress", "example-agent-relay-to-broker", "example-agent-relay-metrics-ingress", "agent-vault.stigen.ai/metrics-scrapers", "kubernetes.io/metadata.name: agent-vault"} {
 		if !strings.Contains(policyText, required) {
 			t.Errorf("network policies omit %q", required)
 		}
