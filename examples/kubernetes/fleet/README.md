@@ -93,3 +93,13 @@ kubectl apply -k examples/kubernetes
 The broker's init container validates resolved TOML and mounted secret files before startup. Startup, readiness, and liveness use separate HTTPS endpoints; provider or PostgreSQL outages remove a pod from service without causing liveness restart loops.
 
 Before production, create an overlay that replaces `ghcr.io/stigenai/agent-vault:v0.39.1` with the exact digest built from this fork and adjusts replicas, resources, provider endpoints, trust domain, PostgreSQL capacity, and namespace selectors.
+
+## Run the fleet failure drill
+
+The repository includes a destructive-to-itself E2E drill that creates and deletes a dedicated three-node Kind cluster. It installs pinned Calico and SPIRE releases, starts PostgreSQL, two broker replicas, a workload-specific relay, an untrusted agent, and a TLS test provider:
+
+```bash
+make test-kubernetes-e2e
+```
+
+The drill proves exact SPIFFE request attribution, relay-only network reachability, live short-TTL SVID rotation without pod restart, bounded broker-pod disruption, provider last-known-good behavior, max-staleness fail-close, and recovery. It exports only workload metadata and logs, scans them against every ephemeral secret sentinel, emits a secret-free JSON report, and removes the cluster. Set `KEEP_CLUSTER=1` only for local failure diagnosis; the retained cluster contains test-only credentials and must be deleted afterward.

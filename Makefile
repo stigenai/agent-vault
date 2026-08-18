@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/Infisical/agent-vault/cmd.date=$(DATE) \
 	-X github.com/Infisical/agent-vault/cmd.posthogAPIKey=$(POSTHOG_API_KEY)
 
-.PHONY: build dev test test-postgres-ha test-backup-recovery test-kubernetes-fleet lint coverage test-all clean docker web web-dev sdk-ts sdk-ts-test
+.PHONY: build dev test test-postgres-ha test-backup-recovery test-kubernetes-fleet test-kubernetes-e2e lint coverage test-all clean docker web web-dev sdk-ts sdk-ts-test
 
 web:
 	cd web && npm ci && npm run build
@@ -48,6 +48,9 @@ test-backup-recovery:
 
 test-kubernetes-fleet:
 	./scripts/verify-kubernetes-fleet.sh
+
+test-kubernetes-e2e:
+	./scripts/verify-kubernetes-e2e.sh
 
 lint:
 	golangci-lint run ./...
