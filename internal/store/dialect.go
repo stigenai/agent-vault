@@ -50,7 +50,8 @@ type Dialect interface {
 
 	// ForUpdateClause returns the SQL fragment appended to SELECT
 	// statements for row-level locking. Returns "" for SQLite (no-op)
-	// and "FOR UPDATE" for PostgreSQL.
+	// and " FOR UPDATE" for PostgreSQL, including the separator needed when the
+	// fragment is appended directly to a query.
 	ForUpdateClause() string
 }
 
@@ -214,7 +215,7 @@ func (PostgresDialect) InsertReturningID(ctx context.Context, execer interface{}
 	return id, nil
 }
 
-func (PostgresDialect) ForUpdateClause() string { return "FOR UPDATE" }
+func (PostgresDialect) ForUpdateClause() string { return " FOR UPDATE" }
 
 // rebindDollar replaces '?' placeholders with $1, $2, ... for PostgreSQL.
 // Only replaces '?' outside of single-quoted string literals. Handles

@@ -69,6 +69,7 @@
               "self-hosting/postgres",
               "self-hosting/runtime-configuration",
               "guides/fleet-reconciliation",
+              "self-hosting/backup-recovery",
               "self-hosting/key-recovery",
               "self-hosting/environment-variables",
               "self-hosting/maintenance",
