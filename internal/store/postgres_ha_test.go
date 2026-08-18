@@ -272,6 +272,66 @@ func TestPostgresHAConcurrentMigrationsAndSPIFFEBootstrap(t *testing.T) {
 	}
 }
 
+func TestPostgresHAAuthMigrationInventoryAndRevocation(t *testing.T) {
+	database := newPostgresHATestDatabase(t)
+	stores := database.openReplicas(t, 1)
+	defer closePostgresHAStores(stores)
+	s := stores[0]
+	ctx := context.Background()
+
+	vault, err := s.GetVault(ctx, DefaultVault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.CreateUser(ctx, "postgres-migration@example.com", []byte("hash"), []byte("salt"), "owner", 1, 8, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.CreateAgent(ctx, "postgres-spiffe-owner", user.ID, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAgentSPIFFEID(ctx, owner.ID, "spiffe://cluster.example/ns/operators/sa/postgres-owner"); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := s.CreateAgent(ctx, "postgres-legacy-worker", user.ID, "no-access")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.GrantVaultRole(ctx, worker.ID, "agent", vault.ID, "proxy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUserSession(ctx, CreateUserSessionParams{UserID: user.ID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAgentToken(ctx, worker.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	inventory, err := s.InspectAuthMigration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.ActiveSPIFFEOwners != 1 || inventory.PersistedSessions() != 2 ||
+		len(inventory.UnboundActiveAgentNames) != 1 || inventory.UnboundActiveAgentNames[0] != worker.Name {
+		t.Fatalf("PostgreSQL migration inventory = %#v", inventory)
+	}
+	if revoked, err := s.RevokeLegacySessions(ctx); err != nil || revoked != 2 {
+		t.Fatalf("PostgreSQL revoked sessions = %d, %v", revoked, err)
+	}
+	if err := s.UpdateAgentSPIFFEID(ctx, worker.ID, "spiffe://cluster.example/ns/agents/sa/postgres-worker"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.InspectAuthMigration(ctx)
+	if err != nil || after.PersistedSessions() != 0 || len(after.UnboundActiveAgentNames) != 0 {
+		t.Fatalf("PostgreSQL final migration inventory = %#v, %v", after, err)
+	}
+	grants, err := s.ListActorGrants(ctx, worker.ID)
+	if err != nil || len(grants) != 1 || grants[0].Role != "proxy" {
+		t.Fatalf("PostgreSQL migration changed grants = %#v, %v", grants, err)
+	}
+}
+
 func TestPostgresHARefreshClaimsSurviveConnectionLoss(t *testing.T) {
 	database := newPostgresHATestDatabase(t)
 	stores := database.openReplicas(t, 6)

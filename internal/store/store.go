@@ -571,6 +571,32 @@ type SPIFFEOwnerBootstrap struct {
 	SPIFFEOwners  int
 }
 
+// AuthMigrationInventory is secret-free state used to gate a staged move from
+// legacy bearer/password authentication to SPIFFE-only authentication.
+// Persisted sessions include user logins, vault-scoped tokens, and agent
+// tokens; SPIFFE authentication does not create session rows.
+type AuthMigrationInventory struct {
+	Users                   int
+	ActiveAgents            int
+	UnboundActiveAgentNames []string
+	PersistedUserSessions   int
+	PersistedAgentSessions  int
+	PersistedScopedSessions int
+	ActiveSPIFFEOwners      int
+}
+
+func (i AuthMigrationInventory) PersistedSessions() int {
+	return i.PersistedUserSessions + i.PersistedAgentSessions + i.PersistedScopedSessions
+}
+
+// AuthMigrationStore provides the two deliberately explicit operations used
+// by the authentication migration API. Revocation deletes persisted sessions
+// only; it does not delete users, agents, SPIFFE bindings, or vault grants.
+type AuthMigrationStore interface {
+	InspectAuthMigration(context.Context) (AuthMigrationInventory, error)
+	RevokeLegacySessions(context.Context) (int64, error)
+}
+
 // UserInvite represents an instance-level invitation for a new user.
 // Invites bring users into the instance, with optional vault pre-assignment.
 type UserInvite struct {

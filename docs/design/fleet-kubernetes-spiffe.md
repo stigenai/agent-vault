@@ -298,8 +298,9 @@ includes:
 4. Add multiple DEK wrappers and perform a recovery drill.
 5. Refactor secret stores to per-credential providers and add provider drivers.
 6. Add desired-state plan/apply and CLI import workflows.
-7. Deploy in hybrid authentication mode for migration, then switch the fleet
-   deployment to SPIFFE-only mode and disable legacy credentials.
+7. Follow the [hybrid-to-SPIFFE-only runbook](/self-hosting/spiffe-migration):
+   inventory and bind identities, soak both paths, revoke persisted legacy
+   credentials, then switch the fleet deployment to SPIFFE-only mode.
 
 ## Security acceptance boundaries
 

@@ -113,6 +113,43 @@ description: "Complete reference for all Agent Vault CLI commands."
   </Accordion>
 </AccordionGroup>
 
+## Authentication migration
+
+<AccordionGroup>
+  <Accordion title="agent-vault auth migration status">
+    ```bash
+    agent-vault auth migration status [--json]
+    ```
+
+    Return a secret-free inventory of the current auth mode, active SPIFFE owners, active agents without SPIFFE IDs, and persisted user, agent, and scoped sessions. `ready_to_switch` is true only when the SPIFFE-only cutover has no blockers.
+  </Accordion>
+
+  <Accordion title="agent-vault auth migration bind-agent">
+    ```bash
+    agent-vault auth migration bind-agent <name> --spiffe-id spiffe://...
+    ```
+
+    Bind an existing active agent to one exact SPIFFE ID without changing its vault grants or services. Requires an instance owner.
+  </Accordion>
+
+  <Accordion title="agent-vault auth migration revoke-legacy-sessions">
+    ```bash
+    agent-vault auth migration revoke-legacy-sessions --confirm
+    ```
+
+    Transactionally revoke every persisted password session, vault-scoped token, and durable agent token. Users, agents, grants, services, and SPIFFE bindings remain intact. Run from a verified owner SVID after the hybrid soak.
+  </Accordion>
+
+  <Accordion title="agent-vault auth migration verify">
+    ```bash
+    agent-vault auth migration verify
+    ```
+
+    Fail unless the running server is in `spiffe` mode, all active agents are bound, an active SPIFFE owner exists, no persisted legacy session remains, and legacy routes are disabled. See [Migrate to SPIFFE-only authentication](/self-hosting/spiffe-migration).
+  </Accordion>
+</AccordionGroup>
+
+
 ## CA
 
 <AccordionGroup>
@@ -816,6 +853,7 @@ description: "Complete reference for all Agent Vault CLI commands."
     |------|---------|-------------|
     | `--role` | `no-access` | Instance-level role: `owner`, `member`, or `no-access` |
     | `--vault` | | Vault pre-assignment in `name:role` format (repeatable). Role defaults to `proxy`. |
+    | `--spiffe-id` | | Exact SPIFFE ID to bind at creation time. |
     | `--token-only` | `false` | Output only the raw agent token (for programmatic use) |
     | `--address` | | Agent Vault server address (defaults to session address) |
 

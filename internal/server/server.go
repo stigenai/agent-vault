@@ -965,6 +965,8 @@ func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.No
 	mux.HandleFunc("GET /v1/fleet/state", s.requireInitialized(s.requireAuth(actorAuthed(s.handleFleetState))))
 	mux.HandleFunc("POST /v1/fleet/provider-reference/validate", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleFleetProviderReferenceValidate)))))
 	mux.HandleFunc("POST /v1/fleet/apply", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleFleetApply)))))
+	mux.HandleFunc("GET /v1/admin/auth-migration", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAuthMigrationStatus))))
+	mux.HandleFunc("POST /v1/admin/auth-migration/revoke-legacy-sessions", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAuthMigrationRevokeLegacy)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/approve", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalApprove)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/reject", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalReject)))))
 
