@@ -69,6 +69,49 @@ func TestValidateManifestCanonicalizesTransportInput(t *testing.T) {
 	}
 }
 
+func TestValidateManifestPreservesOAuth2ClientCredentialsAuth(t *testing.T) {
+	want := Auth{
+		Kind:            "oauth2-client-credentials",
+		ClientID:        "BLOCKS_CLIENT_ID",
+		ClientSecret:    "BLOCKS_CLIENT_SECRET",
+		TokenURL:        "https://auth.example.com/oauth2/token",
+		Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+		TokenAuthMethod: "client_secret_basic",
+		Headers: map[string]string{
+			"CF-Access-Client-Id":     "{{ CF_ACCESS_CLIENT_ID }}",
+			"CF-Access-Client-Secret": "{{ CF_ACCESS_CLIENT_SECRET }}",
+		},
+	}
+	credential := func(name string) Credential {
+		return Credential{
+			Name: name, Mode: "reference", Source: "aws-production", Reference: "approval/" + name,
+			RefreshInterval: "5m", MaxStaleness: "1h",
+		}
+	}
+	manifest := Manifest{
+		SchemaVersion: SchemaVersion,
+		Manager:       "platform-fleet",
+		Vaults: []Vault{{
+			Name: "approval",
+			Services: []Service{{
+				Name: "blocks", Host: "blocks.example.com", Path: "/blocks*", Auth: want,
+			}},
+			Credentials: []Credential{
+				credential("BLOCKS_CLIENT_ID"), credential("BLOCKS_CLIENT_SECRET"),
+				credential("CF_ACCESS_CLIENT_ID"), credential("CF_ACCESS_CLIENT_SECRET"),
+			},
+		}},
+	}
+
+	canonical, err := ValidateManifest(manifest, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonical.Vaults[0].Services[0].Auth; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OAuth auth changed during transport validation: got %#v, want %#v", got, want)
+	}
+}
+
 func TestImportProvidersAreValidatedSeparatelyFromDurableProviders(t *testing.T) {
 	path := writeManifest(t, "separate-providers.toml", `
 schema_version = 1
@@ -412,6 +455,55 @@ func TestLoadFilesDoesNotReturnPartialStateOnAnyError(t *testing.T) {
 	manifest, err := LoadFiles([]string{good, bad}, testOptions())
 	if err == nil || manifest != nil {
 		t.Fatalf("manifest = %#v, error = %v", manifest, err)
+	}
+}
+
+func TestLoadFilesAcceptsOAuth2ClientCredentialsService(t *testing.T) {
+	path := writeManifest(t, "oauth-client-credentials.toml", `
+schema_version = 1
+manager = "platform-fleet"
+[[vaults]]
+name = "approval"
+[[vaults.services]]
+name = "blocks"
+host = "blocks.example.com/blocks*"
+auth = { kind = "oauth2-client-credentials", client_id = "BLOCKS_CLIENT_ID", client_secret = "BLOCKS_CLIENT_SECRET", token_url = "https://auth.example.com/oauth2/token", scopes = ["blocks:read", "blocks:write", "blocks:delete"], token_auth_method = "client_secret_basic", headers = { CF-Access-Client-Id = "{{ CF_ACCESS_CLIENT_ID }}", CF-Access-Client-Secret = "{{ CF_ACCESS_CLIENT_SECRET }}" } }
+[[vaults.credentials]]
+name = "BLOCKS_CLIENT_ID"
+mode = "reference"
+source = "aws-production"
+ref = "blocks#client-id"
+refresh_interval = "5m"
+max_staleness = "1h"
+[[vaults.credentials]]
+name = "BLOCKS_CLIENT_SECRET"
+mode = "reference"
+source = "aws-production"
+ref = "blocks#client-secret"
+refresh_interval = "5m"
+max_staleness = "1h"
+[[vaults.credentials]]
+name = "CF_ACCESS_CLIENT_ID"
+mode = "reference"
+source = "aws-production"
+ref = "cloudflare#client-id"
+refresh_interval = "5m"
+max_staleness = "1h"
+[[vaults.credentials]]
+name = "CF_ACCESS_CLIENT_SECRET"
+mode = "reference"
+source = "aws-production"
+ref = "cloudflare#client-secret"
+refresh_interval = "5m"
+max_staleness = "1h"
+`)
+	manifest, err := LoadFiles([]string{path}, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := manifest.Vaults[0].Services[0].Auth
+	if auth.Kind != "oauth2-client-credentials" || auth.TokenURL != "https://auth.example.com/oauth2/token" || len(auth.Scopes) != 3 {
+		t.Fatalf("OAuth client credentials auth drifted: %#v", auth)
 	}
 }
 

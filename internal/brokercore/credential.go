@@ -2,12 +2,15 @@ package brokercore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/broker"
@@ -93,11 +96,12 @@ type DynamicCredentialResolver interface {
 // StoreCredentialProvider injects credentials using a CredentialStore and a
 // 32-byte AES-256-GCM key held in memory for the lifetime of the process.
 type StoreCredentialProvider struct {
-	Store      CredentialStore
-	OAuthStore OAuthStore // nil = no OAuth refresh
-	EncKey     []byte
-	Refresher  *oauth.Refresher          // nil = no OAuth refresh
-	Dynamic    DynamicCredentialResolver // nil = no dynamic-secret resolution
+	Store             CredentialStore
+	OAuthStore        OAuthStore // nil = no OAuth refresh
+	EncKey            []byte
+	Refresher         *oauth.Refresher          // nil = no OAuth refresh
+	Dynamic           DynamicCredentialResolver // nil = no dynamic-secret resolution
+	clientCredentials sync.Map
 }
 
 // NewStoreCredentialProvider constructs a provider. encKey must be 32 bytes.
@@ -242,14 +246,104 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 		return result, nil
 	}
 
-	headers, err := matched.Auth.Resolve(getCredential)
+	var headers map[string]string
+	if matched.Auth.Type == "oauth2-client-credentials" {
+		headers, err = p.resolveClientCredentials(ctx, vaultID, matched.Name, &matched.Auth, getCredential)
+	} else {
+		headers, err = matched.Auth.Resolve(getCredential)
+	}
 	if err != nil {
+		if errors.Is(err, ErrOAuthRefreshFailed) {
+			return result, err
+		}
 		return result, fmt.Errorf("%w: %v", ErrCredentialMissing, err)
 	}
 
 	result.Headers = headers
 	result.Substitutions = resolvedSubs
 	return result, nil
+}
+
+type clientCredentialsCacheEntry struct {
+	accessToken string
+	expiresAt   time.Time
+}
+
+func (p *StoreCredentialProvider) resolveClientCredentials(
+	ctx context.Context,
+	vaultID string,
+	serviceName string,
+	auth *broker.Auth,
+	getCredential func(string) (string, error),
+) (map[string]string, error) {
+	clientID, err := getCredential(auth.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := getCredential(auth.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	fingerprint := sha256.Sum256([]byte(clientID + "\x00" + clientSecret + "\x00" + auth.TokenURL + "\x00" + strings.Join(auth.Scopes, "\x00")))
+	cacheKey := fmt.Sprintf("%s|%s|%x", vaultID, serviceName, fingerprint)
+	if cached, ok := p.clientCredentials.Load(cacheKey); ok {
+		entry := cached.(clientCredentialsCacheEntry)
+		if time.Until(entry.expiresAt) > oauthRefreshBuffer {
+			return p.clientCredentialsHeaders(entry.accessToken, auth, getCredential)
+		}
+	}
+
+	mint := func() oauth.RefreshResult {
+		if cached, ok := p.clientCredentials.Load(cacheKey); ok {
+			entry := cached.(clientCredentialsCacheEntry)
+			if time.Until(entry.expiresAt) > oauthRefreshBuffer {
+				return oauth.RefreshResult{AccessToken: entry.accessToken, Refreshed: true}
+			}
+		}
+		token, mintErr := oauth.ClientCredentials(ctx, oauth.ClientCredentialsConfig{
+			TokenURL: auth.TokenURL, ClientID: clientID, ClientSecret: clientSecret,
+			Scopes: auth.Scopes, TokenAuthMethod: auth.TokenAuthMethod,
+		})
+		if mintErr != nil {
+			return oauth.RefreshResult{Err: fmt.Errorf("%w: client credentials token mint failed", ErrOAuthRefreshFailed)}
+		}
+		p.clientCredentials.Store(cacheKey, clientCredentialsCacheEntry{
+			accessToken: token.AccessToken,
+			expiresAt:   token.ExpiresAt,
+		})
+		return oauth.RefreshResult{AccessToken: token.AccessToken, Refreshed: true}
+	}
+
+	var minted oauth.RefreshResult
+	if p.Refresher == nil {
+		minted = mint()
+	} else {
+		minted = p.Refresher.Do("client-credentials|"+cacheKey, mint)
+	}
+	if minted.Err != nil {
+		return nil, minted.Err
+	}
+	return p.clientCredentialsHeaders(minted.AccessToken, auth, getCredential)
+}
+
+func (p *StoreCredentialProvider) clientCredentialsHeaders(
+	accessToken string,
+	auth *broker.Auth,
+	getCredential func(string) (string, error),
+) (map[string]string, error) {
+	headers := map[string]string{"Authorization": "Bearer " + accessToken}
+	if len(auth.Headers) == 0 {
+		return headers, nil
+	}
+	supplemental, err := (&broker.Auth{Type: "custom", Headers: auth.Headers}).Resolve(getCredential)
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range supplemental {
+		headers[name] = value
+	}
+	return headers, nil
 }
 
 const oauthRefreshBuffer = 5 * time.Minute

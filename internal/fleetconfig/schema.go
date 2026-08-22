@@ -66,13 +66,18 @@ type Service struct {
 // Auth references credential identities only. Credential is used by bearer
 // and api-key auth; Username and Password are used by basic auth.
 type Auth struct {
-	Kind       string            `json:"kind"`
-	Credential string            `json:"credential,omitempty"`
-	Username   string            `json:"username,omitempty"`
-	Password   string            `json:"password,omitempty"`
-	Header     string            `json:"header,omitempty"`
-	Prefix     string            `json:"prefix,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
+	Kind            string            `json:"kind"`
+	Credential      string            `json:"credential,omitempty"`
+	Username        string            `json:"username,omitempty"`
+	Password        string            `json:"password,omitempty"`
+	Header          string            `json:"header,omitempty"`
+	Prefix          string            `json:"prefix,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	ClientID        string            `json:"client_id,omitempty"`
+	ClientSecret    string            `json:"client_secret,omitempty"`
+	TokenURL        string            `json:"token_url,omitempty"`
+	Scopes          []string          `json:"scopes,omitempty"`
+	TokenAuthMethod string            `json:"token_auth_method,omitempty"`
 }
 
 type Substitution struct {
@@ -114,6 +119,9 @@ func (s Service) BrokerService() broker.Service {
 		Header:   s.Auth.Header,
 		Prefix:   s.Auth.Prefix,
 		Headers:  s.Auth.Headers,
+		ClientID: s.Auth.ClientID, ClientSecret: s.Auth.ClientSecret,
+		TokenURL: s.Auth.TokenURL, Scopes: append([]string(nil), s.Auth.Scopes...),
+		TokenAuthMethod: s.Auth.TokenAuthMethod,
 	}
 	switch s.Auth.Kind {
 	case "bearer":

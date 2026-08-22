@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/crypto"
+	"github.com/Infisical/agent-vault/internal/oauth"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -105,6 +108,61 @@ func TestInject_BearerHappyPath(t *testing.T) {
 	}
 	if res.Headers["Authorization"] != "Bearer s3cret" {
 		t.Fatalf("got Authorization=%q", res.Headers["Authorization"])
+	}
+}
+
+func TestInject_OAuth2ClientCredentialsMintsAndCaches(t *testing.T) {
+	var tokenCalls int
+	tokenServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls++
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse token request: %v", err)
+		}
+		if r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("scope") != "blocks:read blocks:write blocks:delete" {
+			t.Fatalf("unexpected token request form")
+		}
+		clientID, clientSecret, ok := r.BasicAuth()
+		if !ok || clientID != "client-id" || clientSecret != "client-secret" {
+			t.Fatal("unexpected client authentication")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"short-lived","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer tokenServer.Close()
+	previousTokenClient := oauth.TokenClient
+	oauth.TokenClient = tokenServer.Client()
+	defer func() { oauth.TokenClient = previousTokenClient }()
+
+	key32 := make32(0x12)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Name: "blocks-service", Host: "blocks.example.com", Path: "/blocks*",
+		Auth: broker.Auth{
+			Type:     "oauth2-client-credentials",
+			ClientID: "BLOCKS_CLIENT_ID", ClientSecret: "BLOCKS_CLIENT_SECRET",
+			TokenURL:        tokenServer.URL,
+			Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+			TokenAuthMethod: "client_secret_basic",
+			Headers:         map[string]string{"CF-Access-Client-Id": "{{ CF_ACCESS_CLIENT_ID }}"},
+		},
+	}})
+	f.setCred(t, key32, "v1", "BLOCKS_CLIENT_ID", "client-id")
+	f.setCred(t, key32, "v1", "BLOCKS_CLIENT_SECRET", "client-secret")
+	f.setCred(t, key32, "v1", "CF_ACCESS_CLIENT_ID", "access-id")
+
+	p := NewStoreCredentialProvider(f, key32)
+	p.Refresher = oauth.NewRefresher()
+	for i := 0; i < 2; i++ {
+		result, err := p.Inject(context.Background(), "v1", "blocks.example.com", 443, "/blocks")
+		if err != nil {
+			t.Fatalf("Inject %d: %v", i, err)
+		}
+		if result.Headers["Authorization"] != "Bearer short-lived" || result.Headers["CF-Access-Client-Id"] != "access-id" {
+			t.Fatalf("unexpected injected headers")
+		}
+	}
+	if tokenCalls != 1 {
+		t.Fatalf("token endpoint calls = %d, want 1", tokenCalls)
 	}
 }
 

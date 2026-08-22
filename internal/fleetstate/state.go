@@ -67,13 +67,18 @@ type ServiceSpec struct {
 }
 
 type ServiceAuthSpec struct {
-	Kind         string                `json:"kind"`
-	Credential   string                `json:"credential,omitempty"`
-	Username     string                `json:"username,omitempty"`
-	Password     string                `json:"password,omitempty"`
-	Header       string                `json:"header,omitempty"`
-	PrefixSHA256 string                `json:"prefix_sha256,omitempty"`
-	Headers      map[string]HeaderSpec `json:"headers,omitempty"`
+	Kind            string                `json:"kind"`
+	Credential      string                `json:"credential,omitempty"`
+	Username        string                `json:"username,omitempty"`
+	Password        string                `json:"password,omitempty"`
+	Header          string                `json:"header,omitempty"`
+	PrefixSHA256    string                `json:"prefix_sha256,omitempty"`
+	Headers         map[string]HeaderSpec `json:"headers,omitempty"`
+	ClientID        string                `json:"client_id,omitempty"`
+	ClientSecret    string                `json:"client_secret,omitempty"`
+	TokenURL        string                `json:"token_url,omitempty"`
+	Scopes          []string              `json:"scopes,omitempty"`
+	TokenAuthMethod string                `json:"token_auth_method,omitempty"`
 }
 
 type HeaderSpec struct {
@@ -97,7 +102,10 @@ func NewResource(kind, vault, name string, spec any) (Resource, error) {
 func RedactService(service broker.Service) ServiceSpec {
 	auth := ServiceAuthSpec{
 		Kind: service.Auth.Type, Username: service.Auth.Username, Password: service.Auth.Password,
-		Header: service.Auth.Header,
+		Header:   service.Auth.Header,
+		ClientID: service.Auth.ClientID, ClientSecret: service.Auth.ClientSecret,
+		TokenURL: service.Auth.TokenURL, Scopes: append([]string(nil), service.Auth.Scopes...),
+		TokenAuthMethod: service.Auth.TokenAuthMethod,
 	}
 	switch service.Auth.Type {
 	case "bearer":

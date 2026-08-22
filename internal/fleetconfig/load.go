@@ -51,13 +51,18 @@ type rawService struct {
 }
 
 type rawAuth struct {
-	Kind       string            `toml:"kind"`
-	Credential string            `toml:"credential"`
-	Username   string            `toml:"username"`
-	Password   string            `toml:"password"`
-	Header     string            `toml:"header"`
-	Prefix     string            `toml:"prefix"`
-	Headers    map[string]string `toml:"headers"`
+	Kind            string            `toml:"kind"`
+	Credential      string            `toml:"credential"`
+	Username        string            `toml:"username"`
+	Password        string            `toml:"password"`
+	Header          string            `toml:"header"`
+	Prefix          string            `toml:"prefix"`
+	Headers         map[string]string `toml:"headers"`
+	ClientID        string            `toml:"client_id"`
+	ClientSecret    string            `toml:"client_secret"`
+	TokenURL        string            `toml:"token_url"`
+	Scopes          []string          `toml:"scopes"`
+	TokenAuthMethod string            `toml:"token_auth_method"`
 }
 
 type rawSubstitution struct {

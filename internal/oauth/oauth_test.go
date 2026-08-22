@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -330,6 +331,88 @@ func TestRefresh_RateLimited(t *testing.T) {
 	}
 }
 
+func TestClientCredentialsBasicAuth(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if got := r.Form.Get("grant_type"); got != "client_credentials" {
+			t.Fatalf("grant_type = %q", got)
+		}
+		if got := r.Form.Get("scope"); got != "blocks:read blocks:write blocks:delete" {
+			t.Fatalf("scope = %q", got)
+		}
+		clientID, clientSecret, ok := r.BasicAuth()
+		if !ok || clientID != "six-city" || clientSecret != "secret" {
+			t.Fatal("unexpected basic auth identity")
+		}
+		if r.Form.Get("client_id") != "six-city" || r.Form.Get("client_secret") != "" {
+			t.Fatal("client secret leaked into form body")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"minted","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	token, err := ClientCredentials(context.Background(), ClientCredentialsConfig{
+		TokenURL: server.URL, ClientID: "six-city", ClientSecret: "secret",
+		Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+		TokenAuthMethod: "client_secret_basic",
+	})
+	if err != nil {
+		t.Fatalf("ClientCredentials: %v", err)
+	}
+	if token.AccessToken != "minted" || token.ExpiresAt.IsZero() || calls != 1 {
+		t.Fatalf("unexpected token result: token=%q expires=%v calls=%d", token.AccessToken, token.ExpiresAt, calls)
+	}
+}
+
+func TestClientCredentialsDefaultsToPostAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if _, _, ok := r.BasicAuth(); ok {
+			t.Fatal("default client authentication unexpectedly used basic auth")
+		}
+		if r.Form.Get("client_id") != "six-city" || r.Form.Get("client_secret") != "secret" {
+			t.Fatal("client credentials missing from form body")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"minted","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	token, err := ClientCredentials(context.Background(), ClientCredentialsConfig{
+		TokenURL: server.URL, ClientID: "six-city", ClientSecret: "secret",
+		Scopes: []string{"blocks:read"},
+	})
+	if err != nil {
+		t.Fatalf("ClientCredentials: %v", err)
+	}
+	if token.AccessToken != "minted" || token.ExpiresAt.IsZero() {
+		t.Fatalf("unexpected token result: token=%q expires=%v", token.AccessToken, token.ExpiresAt)
+	}
+}
+
+func TestClientCredentialsRejectsNonExpiringToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"minted","token_type":"bearer"}`))
+	}))
+	defer server.Close()
+
+	_, err := ClientCredentials(context.Background(), ClientCredentialsConfig{
+		TokenURL: server.URL, ClientID: "six-city", ClientSecret: "secret",
+		Scopes: []string{"blocks:read"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "expiring bearer access token") {
+		t.Fatalf("ClientCredentials error = %v, want expiry rejection", err)
+	}
+}
+
 func TestIsPermanentError(t *testing.T) {
 	tests := []struct {
 		code int
@@ -341,9 +424,9 @@ func TestIsPermanentError(t *testing.T) {
 		{401, true},
 		{403, true},
 		{404, true},
-		{408, false},  // Request Timeout — transient
+		{408, false}, // Request Timeout — transient
 		{422, true},
-		{429, false},  // Too Many Requests — transient
+		{429, false}, // Too Many Requests — transient
 		{500, false},
 		{502, false},
 		{503, false},

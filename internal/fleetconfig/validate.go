@@ -44,7 +44,10 @@ func ValidateManifest(manifest Manifest, options LoadOptions) (*Manifest, error)
 					Kind: service.Auth.Kind, Credential: service.Auth.Credential,
 					Username: service.Auth.Username, Password: service.Auth.Password,
 					Header: service.Auth.Header, Prefix: service.Auth.Prefix,
-					Headers: service.Auth.Headers,
+					Headers:  service.Auth.Headers,
+					ClientID: service.Auth.ClientID, ClientSecret: service.Auth.ClientSecret,
+					TokenURL: service.Auth.TokenURL, Scopes: append([]string(nil), service.Auth.Scopes...),
+					TokenAuthMethod: service.Auth.TokenAuthMethod,
 				},
 			}
 			for _, substitution := range service.Substitutions {
@@ -262,6 +265,9 @@ func serviceFromRaw(raw rawService) Service {
 			Kind: raw.Auth.Kind, Credential: raw.Auth.Credential,
 			Username: raw.Auth.Username, Password: raw.Auth.Password,
 			Header: raw.Auth.Header, Prefix: raw.Auth.Prefix, Headers: raw.Auth.Headers,
+			ClientID: raw.Auth.ClientID, ClientSecret: raw.Auth.ClientSecret,
+			TokenURL: raw.Auth.TokenURL, Scopes: append([]string(nil), raw.Auth.Scopes...),
+			TokenAuthMethod: raw.Auth.TokenAuthMethod,
 		},
 		Substitutions: subs,
 	}
