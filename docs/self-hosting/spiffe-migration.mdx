@@ -1,0 +1,139 @@
+---
+title: "Migrate to SPIFFE-only authentication"
+description: "Inventory, bind, verify, revoke legacy tokens, and switch a running fleet from hybrid to SPIFFE-only authentication."
+---
+
+This procedure preserves users, agents, vault grants, services, credentials, and audit history while replacing password sessions and durable bearer tokens with rotating SPIRE X.509-SVIDs. Run it from a reviewed change window. Do not combine it with a database, DEK-wrapper, or provider migration.
+
+## Preconditions and checkpoint zero
+
+Before changing authentication:
+
+1. Complete a tested [PostgreSQL backup and restore](/self-hosting/backup-recovery).
+2. Record the Agent Vault image digest, runtime TOML revision, SPIRE trust domain, and every workload-to-SPIFFE-ID mapping.
+3. Confirm at least two operators can obtain the intended owner SVID from separate pods.
+4. Keep password hashes and user records during the migration. They are the rollback path while `auth.mode = "hybrid"`.
+5. Remove `AGENT_VAULT_AUTH_MODE` if TOML owns this setting; environment values override TOML.
+
+The migration status API returns counts and agent names only. It never returns session hashes, passwords, bearer tokens, credential values, provider responses, or key material.
+
+## Stage 1: deploy hybrid mode
+
+Configure the broker API and proxy listeners with SPIRE while retaining legacy login temporarily:
+
+```toml
+[auth]
+mode = "hybrid"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+
+[client]
+address = "https://agent-vault.agent-vault.svc.cluster.local"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+```
+
+Do not set `auth.bootstrap_owner_ids` in hybrid mode. Create or bind the migration owner through the existing owner session, then perform subsequent steps from a pod carrying that owner SVID. Confirm legacy clients still work before proceeding.
+
+Checkpoint: rolling back is only a configuration rollback to `legacy`; no session has been revoked yet.
+
+## Stage 2: inventory and bind identities
+
+Run status from an owner context:
+
+```bash
+agent-vault auth migration status
+agent-vault auth migration status --json > auth-migration-inventory.json
+```
+
+Create a SPIFFE owner if one does not exist. `agent create` is intentionally available only before the SPIFFE-only switch:
+
+```bash
+agent-vault agent create migration-owner \
+  --role owner \
+  --spiffe-id spiffe://cluster.example/ns/platform-operators/sa/agent-vault-owner
+```
+
+Bind each existing active agent to its exact SPIFFE ID. This updates the identity on the same agent row, so all vault grants and service access remain attached:
+
+```bash
+agent-vault auth migration bind-agent build-runner \
+  --spiffe-id spiffe://cluster.example/ns/agents/sa/build-runner
+```
+
+Alternatively, reconcile the same binding through reviewed fleet TOML. Never use wildcard or prefix identities. Revoke unused agents instead of inventing identities for them.
+
+Repeat `status` until:
+
+- `active_spiffe_owners` is at least one;
+- `unbound_active_agent_names` is empty;
+- each intended workload can call `/discover` and broker a representative request with its SVID;
+- audit rows identify the expected agent and retain the same vault/service grant.
+
+## Stage 3: hybrid soak
+
+Run both paths long enough to cover SVID rotation, a broker rollout, and normal workload traffic. Verify from the SPIFFE operator pod without `AGENT_VAULT_TOKEN` or a session file:
+
+```bash
+agent-vault auth migration status
+agent-vault agent list
+agent-vault config plan --file /etc/agent-vault/desired/fleet.toml
+```
+
+For every workload, compare pre-migration and hybrid `/discover` service names and run a non-destructive authenticated upstream request. A presented but unknown SVID must fail and must not downgrade to a valid bearer token.
+
+Checkpoint: keep `auth.mode = "hybrid"` and correct registrations or bindings if any SPIFFE path fails. Do not revoke legacy sessions yet.
+
+## Stage 4: revoke persisted legacy credentials
+
+Run this from the verified owner SVID. The confirmation is deliberately explicit:
+
+```bash
+agent-vault auth migration revoke-legacy-sessions --confirm
+agent-vault auth migration status
+```
+
+The transaction deletes every persisted user session, vault-scoped session, and durable agent token. It does not delete users, agents, SPIFFE bindings, vault grants, services, credentials, or audit rows. The command may revoke the caller's own bearer session; an SVID-authenticated caller is unaffected.
+
+`ready_to_switch` becomes true only when an active SPIFFE owner exists, every active agent has an exact SPIFFE ID, and no persisted session remains.
+
+Checkpoint: if a workload was missed, keep or restore `auth.mode = "hybrid"`. Human users can log in again and an owner can rotate a specific agent token. Treat that as rollback and repeat the hybrid soak; do not continue with mixed credentials accidentally reissued.
+
+## Stage 5: switch to SPIFFE-only
+
+Change the reviewed runtime configuration and roll the brokers:
+
+```toml
+[auth]
+mode = "spiffe"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+bootstrap_owner_ids = ["spiffe://cluster.example/ns/platform-operators/sa/agent-vault-owner"]
+```
+
+For a migrated database, set `bootstrap_owner_ids` to the exact owner SVID already bound and tested during hybrid mode. Startup requires the list and records its immutable one-time claim, but it does not create a duplicate owner when an owner already exists. Do not use the field to introduce an untested identity during cutover; it is not an ongoing owner allowlist. Remove `AGENT_VAULT_TOKEN`, password-login automation, and session files from workloads.
+
+Wait for startup and readiness on every replica, then verify from the owner SVID:
+
+```bash
+agent-vault auth migration verify
+```
+
+The check requires all readiness blockers to remain clear, `auth_mode` to equal `spiffe`, and legacy routes to be disabled. Also confirm:
+
+- password registration, verification, login, reset, change, and logout routes return `404`;
+- user-session, scoped-token, agent-token creation/rotation, and invite routes return `404`;
+- every pre-revocation bearer token returns `401` on protected routes;
+- SVID-authenticated discovery and representative brokering still use the original grants and services.
+
+## Rollback after the switch
+
+Authentication rollback does not require restoring PostgreSQL because identities and grants were preserved:
+
+1. Roll the previous reviewed configuration with `auth.mode = "hybrid"`.
+2. Log in with an existing active human owner password.
+3. Correct SPIRE registration or bindings.
+4. Rotate only the specific legacy agent tokens needed for temporary recovery.
+5. Re-run inventory, hybrid verification, and global revocation before switching again.
+
+Do not roll back to `legacy` merely because a KMS, provider, or PostgreSQL dependency is unavailable; authentication downgrade does not repair those dependencies and expands the attack surface.

@@ -46,6 +46,17 @@ type RefreshConfig struct {
 	TokenAuthMethod string // "client_secret_post" (default) or "client_secret_basic"
 }
 
+// ClientCredentialsConfig configures the OAuth 2.0 client_credentials grant.
+// It is intended for non-human service accounts and never persists the minted
+// access token outside the broker's in-memory cache.
+type ClientCredentialsConfig struct {
+	TokenURL        string
+	ClientID        string
+	ClientSecret    string
+	Scopes          []string
+	TokenAuthMethod string // "client_secret_post" (default) or "client_secret_basic"
+}
+
 // TokenError is returned when the token endpoint responds with a non-2xx status.
 type TokenError struct {
 	StatusCode int
@@ -161,6 +172,39 @@ var defaultTokenClient = func() *http.Client {
 // TokenClient is the HTTP client used for token endpoint requests.
 // Override this at init time to inject network guards (e.g., SSRF protection).
 var TokenClient = defaultTokenClient
+
+// ClientCredentials obtains a service-account access token per RFC 6749 §4.4.
+func ClientCredentials(ctx context.Context, cfg ClientCredentialsConfig) (*TokenResponse, error) {
+	form := url.Values{"grant_type": {"client_credentials"}}
+	if len(cfg.Scopes) > 0 {
+		form.Set("scope", strings.Join(cfg.Scopes, " "))
+	}
+
+	authMethod := cfg.TokenAuthMethod
+	if authMethod == "" {
+		authMethod = "client_secret_post"
+	}
+	applyClientAuth(form, cfg.ClientID, cfg.ClientSecret, authMethod)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("oauth: building client credentials request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if authMethod == "client_secret_basic" && cfg.ClientSecret != "" {
+		req.SetBasicAuth(cfg.ClientID, cfg.ClientSecret)
+	}
+
+	token, err := doTokenRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if token.AccessToken == "" || !strings.EqualFold(token.TokenType, "bearer") || token.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("oauth: client credentials response must contain an expiring bearer access token")
+	}
+	return token, nil
+}
 
 func doTokenRequest(req *http.Request) (*TokenResponse, error) {
 	resp, err := TokenClient.Do(req)

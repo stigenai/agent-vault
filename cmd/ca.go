@@ -69,7 +69,10 @@ Examples:
       -k /Library/Keychains/System.keychain /dev/stdin`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		addr := resolveAddress(cmd)
+		addr, err := resolveAddressWithWorkloadIdentity(cmd)
+		if err != nil {
+			return err
+		}
 		output, _ := cmd.Flags().GetString("output")
 
 		pem, _, enabled, err := fetchMITMCA(addr)

@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -26,11 +28,15 @@ import (
 	"github.com/Infisical/agent-vault/internal/netguard"
 	"github.com/Infisical/agent-vault/internal/notify"
 	"github.com/Infisical/agent-vault/internal/oauth"
+	"github.com/Infisical/agent-vault/internal/observability"
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
+	"github.com/Infisical/agent-vault/internal/secretprovider"
+	"github.com/Infisical/agent-vault/internal/secretrefresh"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
+	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
 //go:embed all:webdist
@@ -59,18 +65,23 @@ type agentVaultJSON struct {
 
 // Server is the Agent Vault HTTP server.
 type Server struct {
-	httpServer  *http.Server
-	store       Store
-	encKey      []byte // 32-byte encryption key, held in memory while running
-	notifier    *notify.Notifier
-	initialized    bool                // true when at least one owner account exists
-	lastInitCheck  atomic.Int64        // unix-millis of last DB check for initialization (throttle)
-	baseURL     string              // externally-reachable base URL (e.g. "https://sb.example.com")
-	skillCLI    []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
-	mitm        *mitm.Proxy         // transparent MITM proxy; nil only when --mitm-port 0
-	logger      *slog.Logger        // structured logger for per-request observability
-	rateLimit   *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
-	logSink     requestlog.Sink     // per-request persistence sink; never nil (Nop default)
+	httpServer        *http.Server
+	tlsConfig         *tls.Config
+	authMode          string
+	store             Store
+	encKey            []byte // 32-byte encryption key, held in memory while running
+	notifier          *notify.Notifier
+	initialized       bool                // true when at least one owner account exists
+	lastInitCheck     atomic.Int64        // unix-millis of last DB check for initialization (throttle)
+	baseURL           string              // externally-reachable base URL (e.g. "https://sb.example.com")
+	skillCLI          []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
+	mitm              *mitm.Proxy         // transparent MITM proxy; nil only when --mitm-port 0
+	logger            *slog.Logger        // structured logger for per-request observability
+	rateLimit         *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
+	rateLimitBase     ratelimit.Config
+	rateLimitEnvMasks ratelimit.EnvMasks
+	trustedProxyCIDRs []net.IPNet
+	logSink           requestlog.Sink // per-request persistence sink; never nil (Nop default)
 	// touchCache short-circuits per-request session-touch writes. With
 	// db.SetMaxOpenConns(1), every UPDATE — even a no-op — opens the
 	// single WAL writer slot. Caching the last-touch wall-clock per
@@ -84,11 +95,22 @@ type Server struct {
 	infisicalClient *infisical.Client
 	// infisicalSyncer is built in Run; exposed for manual-refresh RefreshOnce.
 	infisicalSyncer *infisical.Syncer
+	secretRefresh   *secretrefresh.Scheduler
+	secretProviders *secretprovider.Registry
+	providerClosers []io.Closer
+	readinessChecks []readinessCheck
 	// infisicalDynamic resolves Infisical dynamic-secret leases on demand; built
 	// in Run alongside the syncer when a client is attached. Nil disables it.
 	infisicalDynamic *infisical.DynamicResolver
 	oauthRefresher   *oauth.Refresher
 	telemetry        *telemetry.Telemetry
+	metrics          *observability.Registry
+	metricsIdentity  *workloadidentity.Source
+}
+
+type readinessCheck struct {
+	failure string
+	check   func(context.Context) error
 }
 
 // lockVaultServices acquires the per-vault mutation lock via the store's
@@ -113,6 +135,40 @@ func (s *Server) AttachInfisical(c *infisical.Client) { s.infisicalClient = c }
 // from the attached client. Used by tests to inject a fake fetcher; in prod
 // Start auto-builds one when the field is nil.
 func (s *Server) AttachInfisicalSyncer(syncer *infisical.Syncer) { s.infisicalSyncer = syncer }
+
+// AttachSecretRefreshScheduler enables the common per-credential refresh
+// worker. Legacy vault-wide Infisical syncing is not auto-started when this
+// scheduler is attached; legacy source rows are handled by the registry.
+func (s *Server) AttachSecretRefreshScheduler(scheduler *secretrefresh.Scheduler) {
+	s.secretRefresh = scheduler
+}
+
+// AttachSecretProviderRegistry exposes the frozen provider parser registry to
+// owner-only fleet validation and apply paths. It never fetches secret values.
+func (s *Server) AttachSecretProviderRegistry(registry *secretprovider.Registry) {
+	s.secretProviders = registry
+}
+
+func (s *Server) AttachSecretProviderCloser(closer io.Closer) {
+	if closer != nil {
+		s.providerClosers = append(s.providerClosers, closer)
+	}
+}
+
+// AttachReadinessCheck adds a non-secret dependency check. Checks are attached
+// during startup before the HTTP listener begins serving requests.
+func (s *Server) AttachReadinessCheck(failure string, check func(context.Context) error) {
+	if failure == "" || check == nil {
+		return
+	}
+	s.readinessChecks = append(s.readinessChecks, readinessCheck{failure: failure, check: check})
+}
+
+// AttachMetricsIdentity exposes only current SVID validity and expiry. Exact
+// SPIFFE IDs and certificate material are intentionally never exported.
+func (s *Server) AttachMetricsIdentity(source *workloadidentity.Source) {
+	s.metricsIdentity = source
+}
 
 // AttachLogSink swaps the per-request log sink. Safe to call once at
 // startup, before the HTTP server begins accepting connections. nil
@@ -179,6 +235,12 @@ func (s *Server) SessionResolver() brokercore.SessionResolver {
 	return brokercore.NewStoreSessionResolver(s.store)
 }
 
+// AgentResolver returns vault-scope resolution for an agent whose transport
+// identity has already been authenticated.
+func (s *Server) AgentResolver() brokercore.AgentResolver {
+	return brokercore.NewStoreSessionResolver(s.store)
+}
+
 // CredentialProvider returns a brokercore.CredentialProvider backed by
 // this server's store and encryption key.
 func (s *Server) CredentialProvider() brokercore.CredentialProvider {
@@ -227,6 +289,30 @@ type credentialStoreAdapter struct {
 	Store
 }
 
+func (a credentialStoreAdapter) GetCredential(ctx context.Context, vaultID, key string) (*store.Credential, error) {
+	credential, err := a.Store.GetCredential(ctx, vaultID, key)
+	if err != nil {
+		return nil, err
+	}
+	sources, ok := any(a.Store).(interface {
+		GetCredentialSource(context.Context, string, string) (*store.CredentialSource, error)
+	})
+	if !ok {
+		return credential, nil
+	}
+	source, err := sources.GetCredentialSource(ctx, vaultID, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return credential, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !store.CredentialSourceUsable(source, time.Now().UTC()) {
+		return nil, store.ErrCredentialStale
+	}
+	return credential, nil
+}
+
 func (a credentialStoreAdapter) UnmatchedHostPolicy(ctx context.Context, vaultID string) (brokercore.UnmatchedHostPolicy, error) {
 	return readUnmatchedHostPolicy(ctx, a.Store, vaultID)
 }
@@ -253,6 +339,14 @@ func (s *Server) BaseURL() string { return s.baseURL }
 
 // Store is the persistence interface used by the server.
 type Store interface {
+	GetManagedResource(ctx context.Context, key store.ManagedResourceKey) (*store.ManagedResource, error)
+	ListManagedResources(ctx context.Context) ([]store.ManagedResource, error)
+	CompareAndSwapManagedResource(ctx context.Context, key store.ManagedResourceKey, manager string, expectedRevision int64) (*store.ManagedResource, error)
+	ReleaseManagedResource(ctx context.Context, key store.ManagedResourceKey, manager string, expectedRevision int64) error
+	ListCredentialSources(ctx context.Context, vaultID string) ([]store.CredentialSource, error)
+	SetCredentialSource(ctx context.Context, source store.CredentialSource) (*store.CredentialSource, error)
+	DeleteCredentialSource(ctx context.Context, vaultID, credentialKey string) error
+
 	GetMasterKeyRecord(ctx context.Context) (*store.MasterKeyRecord, error)
 	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
@@ -379,12 +473,14 @@ type Store interface {
 
 	// Agents
 	CreateAgent(ctx context.Context, name, createdBy, role string) (*store.Agent, error)
-	CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*store.Agent, *store.Session, error)
+	CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*store.Agent, *store.Session, error)
 	GetAgentByID(ctx context.Context, id string) (*store.Agent, error)
+	GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*store.Agent, error)
 	GetAgentNameByID(ctx context.Context, id string) (string, error)
 	GetAgentByName(ctx context.Context, name string) (*store.Agent, error)
 	ListAgents(ctx context.Context, vaultID string) ([]store.Agent, error)
 	ListAllAgents(ctx context.Context) ([]store.Agent, error)
+	UpdateAgentSPIFFEID(ctx context.Context, agentID, spiffeID string) error
 	RevokeAgent(ctx context.Context, id string) error
 	DeleteAgent(ctx context.Context, id string) error
 	RenameAgent(ctx context.Context, id string, newName string) error
@@ -763,36 +859,79 @@ func limitBody(next http.HandlerFunc) http.HandlerFunc {
 // The initialized parameter indicates whether at least one owner account exists.
 // When false, all endpoints except /health and POST /v1/init return 503.
 // logger must be non-nil; tests can pass slog.New(slog.DiscardHandler).
-func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
-	mux := http.NewServeMux()
+type RuntimeOptions struct {
+	RateLimit          ratelimit.Config
+	RateLimitEnvMasks  ratelimit.EnvMasks
+	AllowPrivateRanges bool
+	NetworkAllowlist   []net.IPNet
+	TrustedProxies     []net.IPNet
+	// TLSConfig enables TLS on the API listener. SPIFFE deployments supply a
+	// rotating mTLS config from workloadidentity.Source.
+	TLSConfig      *tls.Config
+	AuthMode       string
+	MetricsEnabled bool
+}
 
-	rlCfg, _ := ratelimit.LoadFromEnv()
-	rl := ratelimit.New(rlCfg)
+func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
+	rlCfg, masks := ratelimit.LoadFromEnv()
+	return NewWithRuntime(addr, store, encKey, notifier, initialized, baseURL, logger, RuntimeOptions{
+		RateLimit:          rlCfg,
+		RateLimitEnvMasks:  masks,
+		AllowPrivateRanges: netguard.AllowPrivateFromEnv(),
+		NetworkAllowlist:   netguard.AllowlistFromEnv(),
+		TrustedProxies:     netguard.ParseCIDRList(os.Getenv("AGENT_VAULT_TRUSTED_PROXIES"), "AGENT_VAULT_TRUSTED_PROXIES"),
+	})
+}
+
+// NewWithRuntime constructs a server exclusively from resolved inputs. New
+// remains as an environment-compatible wrapper for embedders.
+func NewWithRuntime(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger, opts RuntimeOptions) *Server {
+	if opts.AuthMode == "" {
+		opts.AuthMode = "legacy"
+	}
+	mux := http.NewServeMux()
+	rl := ratelimit.New(opts.RateLimit)
+	limited := rl.GlobalMiddleware(logger)(mux)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && healthProbePath(r.URL.Path) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		limited.ServeHTTP(w, r)
+	})
 
 	s := &Server{
 		httpServer: &http.Server{
 			Addr:              addr,
-			Handler:           securityHeaders(rl.GlobalMiddleware(logger)(mux)),
+			Handler:           securityHeaders(handler),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
-		store:          store,
-		encKey:         encKey,
-		notifier:       notifier,
-		initialized:    initialized,
-		baseURL:        strings.TrimRight(baseURL, "/"),
-		logger:         logger,
-		rateLimit:      rl,
-		logSink:        requestlog.Nop{},
-		oauthRefresher: oauth.NewRefresher(),
+		store:             store,
+		encKey:            encKey,
+		notifier:          notifier,
+		initialized:       initialized,
+		baseURL:           strings.TrimRight(baseURL, "/"),
+		logger:            logger,
+		rateLimit:         rl,
+		rateLimitBase:     opts.RateLimit,
+		rateLimitEnvMasks: opts.RateLimitEnvMasks,
+		trustedProxyCIDRs: append([]net.IPNet(nil), opts.TrustedProxies...),
+		tlsConfig:         opts.TLSConfig,
+		authMode:          opts.AuthMode,
+		logSink:           requestlog.Nop{},
+		oauthRefresher:    oauth.NewRefresher(),
+	}
+	if opts.MetricsEnabled {
+		s.metrics = observability.New()
 	}
 
 	// Apply SSRF protection to OAuth token endpoint requests.
 	oauthTransport := http.DefaultTransport.(*http.Transport).Clone()
 	oauthTransport.Proxy = nil
-	oauthTransport.DialContext = netguard.SafeDialContext(netguard.AllowPrivateFromEnv())
+	oauthTransport.DialContext = netguard.SafeDialContextWithAllowlist(opts.AllowPrivateRanges, opts.NetworkAllowlist)
 	oauth.TokenClient = &http.Client{Timeout: 30 * time.Second, Transport: oauthTransport}
 
 	ipAuth := s.tier(ratelimit.TierAuth, s.ipKeyer())
@@ -800,25 +939,31 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	// /health, /v1/status, and other public static routes rely on the
 	// server-wide TierGlobal backstop; no per-route limit is useful.
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/startup", s.handleStartup)
+	mux.HandleFunc("GET /health/ready", s.handleReady)
+	mux.HandleFunc("GET /health/live", s.handleLive)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	mux.HandleFunc("POST /v1/auth/register", ipAuth(limitBody(s.handleRegister)))
-	mux.HandleFunc("POST /v1/auth/verify", ipAuth(limitBody(s.handleVerify)))
-	mux.HandleFunc("POST /v1/auth/resend-verification", ipAuth(limitBody(s.handleResendVerification)))
-	mux.HandleFunc("POST /v1/auth/forgot-password", ipAuth(limitBody(s.handleForgotPassword)))
-	mux.HandleFunc("POST /v1/auth/reset-password", ipAuth(limitBody(s.handleResetPassword)))
+	mux.HandleFunc("POST /v1/auth/register", s.requireLegacyAuth(ipAuth(limitBody(s.handleRegister))))
+	mux.HandleFunc("POST /v1/auth/verify", s.requireLegacyAuth(ipAuth(limitBody(s.handleVerify))))
+	mux.HandleFunc("POST /v1/auth/resend-verification", s.requireLegacyAuth(ipAuth(limitBody(s.handleResendVerification))))
+	mux.HandleFunc("POST /v1/auth/forgot-password", s.requireLegacyAuth(ipAuth(limitBody(s.handleForgotPassword))))
+	mux.HandleFunc("POST /v1/auth/reset-password", s.requireLegacyAuth(ipAuth(limitBody(s.handleResetPassword))))
 
 	actorAuthed := s.tier(ratelimit.TierAuthed, s.actorKeyer())
+	if s.metrics != nil {
+		mux.HandleFunc("GET /metrics", s.requireInitialized(s.requireAuth(actorAuthed(s.handleMetrics))))
+	}
 
 	// Require initialization
 	mux.HandleFunc("GET /v1/auth/me", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAuthMe))))
-	mux.HandleFunc("POST /v1/auth/login", s.requireInitialized(ipAuth(limitBody(s.handleLogin))))
-	mux.HandleFunc("POST /v1/auth/change-password", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleChangePassword)))))
-	mux.HandleFunc("DELETE /v1/auth/account", s.requireInitialized(s.requireAuth(actorAuthed(s.handleDeleteAccount))))
-	mux.HandleFunc("GET /v1/auth/sessions", s.requireInitialized(s.requireAuth(actorAuthed(s.handleListUserSessions))))
-	mux.HandleFunc("DELETE /v1/auth/sessions/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeUserSession))))
-	mux.HandleFunc("POST /v1/sessions", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleScopedSession)))))
-	mux.HandleFunc("GET /v1/sessions", s.requireInitialized(s.requireAuth(actorAuthed(s.handleListScopedSessions))))
-	mux.HandleFunc("DELETE /v1/sessions/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeScopedSession))))
+	mux.HandleFunc("POST /v1/auth/login", s.requireLegacyAuth(s.requireInitialized(ipAuth(limitBody(s.handleLogin)))))
+	mux.HandleFunc("POST /v1/auth/change-password", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleChangePassword))))))
+	mux.HandleFunc("DELETE /v1/auth/account", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleDeleteAccount)))))
+	mux.HandleFunc("GET /v1/auth/sessions", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleListUserSessions)))))
+	mux.HandleFunc("DELETE /v1/auth/sessions/{id}", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeUserSession)))))
+	mux.HandleFunc("POST /v1/sessions", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleScopedSession))))))
+	mux.HandleFunc("GET /v1/sessions", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleListScopedSessions)))))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleRevokeScopedSession)))))
 	mux.HandleFunc("GET /v1/credentials", s.requireInitialized(s.requireAuth(actorAuthed(s.handleCredentialsList))))
 	mux.HandleFunc("POST /v1/credentials", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleCredentialsSet)))))
 	mux.HandleFunc("DELETE /v1/credentials", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleCredentialsDelete)))))
@@ -833,24 +978,30 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	mux.HandleFunc("POST /v1/proposals", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleProposalCreate)))))
 	mux.HandleFunc("GET /v1/proposals/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleProposalGet))))
 	mux.HandleFunc("GET /v1/proposals", s.requireInitialized(s.requireAuth(actorAuthed(s.handleProposalList))))
+	mux.HandleFunc("GET /v1/fleet/state", s.requireInitialized(s.requireAuth(actorAuthed(s.handleFleetState))))
+	mux.HandleFunc("POST /v1/fleet/provider-reference/validate", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleFleetProviderReferenceValidate)))))
+	mux.HandleFunc("POST /v1/fleet/apply", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleFleetApply)))))
+	mux.HandleFunc("GET /v1/admin/auth-migration", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAuthMigrationStatus))))
+	mux.HandleFunc("POST /v1/admin/auth-migration/revoke-legacy-sessions", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAuthMigrationRevokeLegacy)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/approve", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalApprove)))))
 	mux.HandleFunc("POST /v1/admin/proposals/{id}/reject", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAdminProposalReject)))))
 
-	ipUserInviteToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(clientIP, func(r *http.Request) string {
+	ipUserInviteToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(s.clientIP, func(r *http.Request) string {
 		return r.PathValue("token")
 	}))
-	ipApprovalToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(clientIP, func(r *http.Request) string {
+	ipApprovalToken := s.tier(ratelimit.TierAuth, ratelimit.IPTokenKey(s.clientIP, func(r *http.Request) string {
 		return r.URL.Query().Get("token")
 	}))
 
 	// Agent management (instance-level)
-	mux.HandleFunc("POST /v1/agents", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentCreate)))))
+	mux.HandleFunc("POST /v1/agents", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentCreate))))))
 	mux.HandleFunc("GET /v1/agents", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAgentList))))
 	mux.HandleFunc("GET /v1/agents/{name}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAgentGet))))
 	mux.HandleFunc("DELETE /v1/agents/{name}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleAgentRevoke))))
 	mux.HandleFunc("POST /v1/agents/{name}/delete", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentDelete)))))
-	mux.HandleFunc("POST /v1/agents/{name}/rotate", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRotate)))))
+	mux.HandleFunc("POST /v1/agents/{name}/rotate", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRotate))))))
 	mux.HandleFunc("POST /v1/agents/{name}/rename", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentRename)))))
+	mux.HandleFunc("PUT /v1/agents/{name}/spiffe-id", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentSetSPIFFEID)))))
 	mux.HandleFunc("POST /v1/agents/{name}/role", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleAgentSetRole)))))
 
 	// Vault-level agent management
@@ -908,12 +1059,12 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	mux.HandleFunc("GET /v1/mitm/ca.pem", s.handleMITMCA)
 
 	// Instance-level user invites
-	mux.HandleFunc("POST /v1/users/invites", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteCreate)))))
-	mux.HandleFunc("GET /v1/users/invites", s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteList))))
-	mux.HandleFunc("DELETE /v1/users/invites/{token}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteRevoke))))
-	mux.HandleFunc("POST /v1/users/invites/{token}/reinvite", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteReinvite)))))
-	mux.HandleFunc("GET /v1/users/invites/{token}/details", s.requireInitialized(ipUserInviteToken(s.handleUserInviteDetails)))
-	mux.HandleFunc("POST /v1/users/invites/{token}/accept", s.requireInitialized(ipUserInviteToken(limitBody(s.handleUserInviteAccept))))
+	mux.HandleFunc("POST /v1/users/invites", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteCreate))))))
+	mux.HandleFunc("GET /v1/users/invites", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteList)))))
+	mux.HandleFunc("DELETE /v1/users/invites/{token}", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(s.handleUserInviteRevoke)))))
+	mux.HandleFunc("POST /v1/users/invites/{token}/reinvite", s.requireLegacyAuth(s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleUserInviteReinvite))))))
+	mux.HandleFunc("GET /v1/users/invites/{token}/details", s.requireLegacyAuth(s.requireInitialized(ipUserInviteToken(s.handleUserInviteDetails))))
+	mux.HandleFunc("POST /v1/users/invites/{token}/accept", s.requireLegacyAuth(s.requireInitialized(ipUserInviteToken(limitBody(s.handleUserInviteAccept)))))
 
 	// Vault user management (vault admin)
 	mux.HandleFunc("GET /v1/vaults/{name}/users", s.requireInitialized(s.requireAuth(actorAuthed(s.handleVaultUserList))))
@@ -931,7 +1082,7 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	// Email
 	mux.HandleFunc("POST /v1/admin/email/test", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleEmailTest)))))
 
-	mux.HandleFunc("POST /v1/auth/logout", s.requireInitialized(ipAuth(s.handleLogout)))
+	mux.HandleFunc("POST /v1/auth/logout", s.requireLegacyAuth(s.requireInitialized(ipAuth(s.handleLogout))))
 
 	// React app static assets (Vite outputs to /assets/ with base "/")
 	webFS, _ := fs.Sub(webDistFS, "webdist")
@@ -957,10 +1108,29 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	return s
 }
 
+func healthProbePath(path string) bool {
+	switch path {
+	case "/health", "/health/startup", "/health/ready", "/health/live":
+		return true
+	default:
+		return false
+	}
+}
+
 // requireInitialized returns 503 when no owner account exists yet.
 // In multi-instance (Postgres HA) deployments another instance may have
 // handled registration, so we re-check the DB when the in-memory flag is
 // false, throttled to once every 2 seconds to avoid per-request queries.
+func (s *Server) requireLegacyAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authMode == "spiffe" {
+			http.NotFound(w, r)
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) requireInitialized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.initialized {
@@ -973,12 +1143,16 @@ func (s *Server) requireInitialized(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			s.lastInitCheck.Store(now)
-			if count, err := s.store.CountUsers(r.Context()); err == nil && count > 0 {
+			if count, err := s.store.CountAllOwners(r.Context()); err == nil && count > 0 {
 				s.initialized = true
 			} else {
+				message := "No owner account exists. Run 'agent-vault auth register' to create the first account."
+				if s.authMode == "spiffe" {
+					message = "No active SPIFFE owner exists; one-time bootstrap cannot be replayed."
+				}
 				jsonStatus(w, http.StatusServiceUnavailable, map[string]string{
 					"error":   "not_initialized",
-					"message": "No owner account exists. Run 'agent-vault auth register' to create the first account.",
+					"message": message,
 				})
 				return
 			}
@@ -1011,13 +1185,17 @@ func (s *Server) Start() error {
 	pruneCtx, stopWorkers := context.WithCancel(context.Background())
 	defer stopWorkers()
 	go s.runTouchCachePruner(pruneCtx)
+	if s.metrics != nil {
+		s.logger.Info("DEK unwrap ready", slog.String("event", "dek_unwrap"), slog.String("outcome", "ready"))
+		go s.runIdentityObservability(pruneCtx)
+	}
 
 	// syncerDone closes once Syncer.Run has returned AND drained its in-flight
 	// refresh goroutines. We block on it before WipeBytes so a refresh mid-
 	// AES-GCM never reads a zeroed s.encKey (silently produces garbage
 	// ciphertext that lands in the credentials table).
 	syncerDone := make(chan struct{})
-	if s.infisicalSyncer == nil && s.infisicalClient != nil {
+	if s.secretRefresh == nil && s.infisicalSyncer == nil && s.infisicalClient != nil {
 		s.infisicalSyncer = infisical.NewSyncer(s.store, s.infisicalClient, s.encKey, s.logger)
 	}
 	if s.infisicalSyncer != nil {
@@ -1027,6 +1205,33 @@ func (s *Server) Start() error {
 		}()
 	} else {
 		close(syncerDone)
+	}
+	refreshDone := make(chan struct{})
+	if s.secretRefresh != nil {
+		go func() {
+			defer close(refreshDone)
+			_ = s.secretRefresh.Run(pruneCtx, 10*time.Second, func(stats secretrefresh.Stats, err error) {
+				if s.metrics != nil {
+					s.metrics.RecordRefreshCycle(stats.Failed, err)
+				}
+				if err != nil && !errors.Is(err, context.Canceled) {
+					s.logger.Warn("secret refresh cycle failed",
+						slog.String("event", "secret_refresh"),
+						slog.String("outcome", "scheduler_error"))
+					return
+				}
+				if stats.Claimed > 0 {
+					s.logger.Debug("secret refresh cycle",
+						slog.String("event", "secret_refresh"),
+						slog.String("outcome", "complete"),
+						slog.Int("claimed", stats.Claimed),
+						slog.Int("updated", stats.Updated),
+						slog.Int("failed", stats.Failed))
+				}
+			})
+		}()
+	} else {
+		close(refreshDone)
 	}
 
 	// Dynamic-secret resolver: leases minted on demand from the proxy path.
@@ -1044,7 +1249,7 @@ func (s *Server) Start() error {
 		if !s.initialized {
 			fmt.Printf("Run `agent-vault auth register` or visit %s to create the owner account\n", s.baseURL)
 		}
-		if err := s.httpServer.Serve(httpLn); err != nil && err != http.ErrServerClosed {
+		if err := s.serve(httpLn); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
@@ -1075,14 +1280,15 @@ func (s *Server) Start() error {
 		defer func() { _ = pidfile.Remove() }()
 	}
 
+	var serveErr error
 	select {
-	case err := <-errCh:
-		return err
+	case serveErr = <-errCh:
 	case <-stop:
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	var shutdownErr error
 
 	fmt.Println("shutting down server...")
 	if s.mitm != nil {
@@ -1091,7 +1297,7 @@ func (s *Server) Start() error {
 		}
 	}
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("server shutdown: %w", err)
+		shutdownErr = fmt.Errorf("server shutdown: %w", err)
 	}
 
 	// Stop background workers (syncer + touch-cache pruner) and wait for the
@@ -1103,6 +1309,20 @@ func (s *Server) Start() error {
 		fmt.Fprintln(os.Stderr, "warning: infisical syncer did not stop within 5s; skipping key wipe to avoid racing in-flight encrypts")
 		return nil
 	}
+	select {
+	case <-refreshDone:
+		if s.secretRefresh != nil {
+			s.secretRefresh.Close()
+		}
+	case <-time.After(5 * time.Second):
+		fmt.Fprintln(os.Stderr, "warning: secret refresh scheduler did not stop within 5s; skipping key wipe to avoid racing in-flight encrypts")
+		return nil
+	}
+	for _, closer := range s.providerClosers {
+		if err := closer.Close(); err != nil {
+			s.logger.Warn("closing secret provider identity source failed")
+		}
+	}
 
 	// Revoke outstanding dynamic-secret leases (best-effort, self-bounded).
 	// Independent of s.encKey: revocation needs only lease IDs + the client.
@@ -1112,7 +1332,19 @@ func (s *Server) Start() error {
 
 	fmt.Println("server shut down gracefully")
 	crypto.WipeBytes(s.encKey)
-	return nil
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	return serveErr
+}
+
+// serve runs the API server on listener, applying the configured rotating TLS
+// callbacks when workload identity is enabled.
+func (s *Server) serve(listener net.Listener) error {
+	if s.tlsConfig != nil {
+		listener = tls.NewListener(listener, s.tlsConfig)
+	}
+	return s.httpServer.Serve(listener)
 }
 
 var errTooManyPendingCodes = errors.New("too many pending verification codes")
@@ -1185,18 +1417,10 @@ const (
 	userSessionIdleTTL     = 30 * 24 * time.Hour
 )
 
-// trustedProxyCIDRs holds parsed CIDR ranges from AGENT_VAULT_TRUSTED_PROXIES.
-// When non-empty, X-Forwarded-For is only trusted if RemoteAddr matches one of these.
-var trustedProxyCIDRs []net.IPNet
-
-func init() {
-	trustedProxyCIDRs = netguard.ParseCIDRList(os.Getenv("AGENT_VAULT_TRUSTED_PROXIES"), "AGENT_VAULT_TRUSTED_PROXIES")
-}
-
 // ipKeyer returns a ratelimit.Keyer that keys on the request's client IP
 // (honoring AGENT_VAULT_TRUSTED_PROXIES via clientIP).
 func (s *Server) ipKeyer() ratelimit.Keyer {
-	return ratelimit.IPKey(clientIP)
+	return ratelimit.IPKey(s.clientIP)
 }
 
 // actorKeyer returns a ratelimit.Keyer that keys on the authenticated
@@ -1234,6 +1458,24 @@ var (
 // The authenticated session is stored in the request context.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A presented client certificate is authoritative: if it cannot be
+		// mapped to a current active agent, never downgrade to a bearer token.
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			agent, err := workloadidentity.AgentFromTLS(r.Context(), r.TLS, s.store)
+			if err != nil {
+				jsonError(w, http.StatusUnauthorized, "Invalid SPIFFE identity")
+				return
+			}
+			sess := &store.Session{AgentID: agent.ID, CreatedAt: time.Now().UTC()}
+			ctx := context.WithValue(r.Context(), sessionContextKey, sess)
+			next(w, r.WithContext(ctx))
+			return
+		}
+		if s.authMode == "spiffe" {
+			jsonError(w, http.StatusUnauthorized, "SPIFFE client identity required")
+			return
+		}
+
 		var token string
 		header := r.Header.Get("Authorization")
 		if strings.HasPrefix(header, "Bearer ") {
@@ -1255,7 +1497,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		s.maybeTouchSession(r.Context(), sess, token, clientIP(r), r.UserAgent())
+		s.maybeTouchSession(r.Context(), sess, token, s.clientIP(r), r.UserAgent())
 
 		ctx := context.WithValue(r.Context(), sessionContextKey, sess)
 		next(w, r.WithContext(ctx))
@@ -1333,6 +1575,7 @@ func isSecureRequest(r *http.Request, baseURL string) bool {
 // sessionCookie builds an av_session cookie with all hardening flags set.
 // Secure is set based on TLS state or the server's configured baseURL.
 func sessionCookie(r *http.Request, baseURL, value string, maxAge int) *http.Cookie {
+	// #nosec G124 -- Secure is always true for TLS requests; HTTP is supported only for local development.
 	return &http.Cookie{
 		Name:     "av_session",
 		Value:    value,

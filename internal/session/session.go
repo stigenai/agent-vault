@@ -20,6 +20,9 @@ type ClientSession struct {
 	// `--device-label` choice instead of falling back to os.Hostname().
 	// Empty for sessions saved by older clients.
 	DeviceLabel string `json:"device_label,omitempty"`
+	// WorkloadIdentity marks an ephemeral CLI identity. It is never serialized
+	// and never carries or persists a bearer token.
+	WorkloadIdentity bool `json:"-"`
 }
 
 func sessionPath() (string, error) {

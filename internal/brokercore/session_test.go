@@ -142,6 +142,24 @@ func TestResolveForProxy_AgentWithHint(t *testing.T) {
 	}
 }
 
+func TestResolveAgentForProxyUsesAuthenticatedActor(t *testing.T) {
+	f := newFakeSessionStore()
+	f.putVault("v1", "default")
+	f.roles["a1|v1"] = "proxy"
+	r := NewStoreSessionResolver(f)
+
+	scope, err := r.ResolveAgentForProxy(context.Background(), "a1", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.AgentID != "a1" || scope.VaultID != "v1" || scope.VaultRole != "proxy" {
+		t.Fatalf("scope = %+v", scope)
+	}
+	if _, err := r.ResolveAgentForProxy(context.Background(), "", "default"); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("empty authenticated actor: %v", err)
+	}
+}
+
 func TestResolveForProxy_AgentZeroGrants(t *testing.T) {
 	f := newFakeSessionStore()
 	f.sessions["tok"] = &store.Session{AgentID: "a1"}

@@ -5,6 +5,8 @@ description: "Configuration for deploying an instance of Agent Vault."
 
 ## Server configuration
 
+For fleet deployments, these variables can be migrated incrementally to a validated [runtime TOML file](/self-hosting/runtime-configuration). Environment variables continue to override TOML for compatibility.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PORT` | Optional (defaults to `14321`) | The TCP port the server listens on. Overridden by `--port`. |
@@ -28,6 +30,10 @@ description: "Configuration for deploying an instance of Agent Vault."
 | `DB_MAX_OPEN_CONNS` | Optional (defaults to `25`) | Maximum number of open Postgres connections per instance. Only applies when `DATABASE_URL` is set. See [connection pooling](/self-hosting/postgres#operational-notes). |
 | `DB_MAX_IDLE_CONNS` | Optional (defaults to `10`) | Maximum number of idle Postgres connections kept in the pool per instance. Only applies when `DATABASE_URL` is set. See [connection pooling](/self-hosting/postgres#operational-notes). |
 | `DB_CONN_MAX_LIFETIME` | Optional (defaults to `5m`) | Maximum lifetime of a Postgres connection before it is closed and replaced. Go duration string (e.g. `5m`, `1h`). Only applies when `DATABASE_URL` is set. See [connection pooling](/self-hosting/postgres#operational-notes). |
+
+| `DB_CONNECT_TIMEOUT` | Optional (defaults to `10s`) | PostgreSQL startup connection timeout. Accepts `1s` through `1m`. |
+| `DB_TLS_MODE` | Optional | PostgreSQL TLS policy: `disable`, `require`, `verify-ca`, or `verify-full`. Use `verify-full` in production. |
+| `DB_TLS_ROOT_CERT` | Required with verified TLS | Absolute path to the PostgreSQL CA bundle when `DB_TLS_MODE` is `verify-ca` or `verify-full`. |
 
 ## Email SMTP configuration
 
@@ -81,4 +87,3 @@ Agent Vault collects anonymous usage telemetry to help improve the product. No c
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `AGENT_VAULT_TELEMETRY` | Optional (defaults to `true`) | Set to `false` to disable anonymous usage telemetry. Also overridable with `--telemetry=false` on the CLI. |
-

@@ -93,7 +93,7 @@ dockers:
     dockerfile: Dockerfile.goreleaser
     use: buildx
     image_templates:
-      - "infisical/agent-vault:{{ .Version }}-amd64"
+      - "ghcr.io/stigenai/agent-vault:{{ .Version }}-amd64"
     build_flag_templates:
       - "--platform=linux/amd64"
     extra_files:
@@ -105,26 +105,26 @@ dockers:
     dockerfile: Dockerfile.goreleaser
     use: buildx
     image_templates:
-      - "infisical/agent-vault:{{ .Version }}-arm64"
+      - "ghcr.io/stigenai/agent-vault:{{ .Version }}-arm64"
     build_flag_templates:
       - "--platform=linux/arm64"
     extra_files:
       - scripts/docker-entrypoint.sh
 
 docker_manifests:
-  - name_template: "infisical/agent-vault:{{ .Version }}"
+  - name_template: "ghcr.io/stigenai/agent-vault:{{ .Version }}"
     image_templates:
-      - "infisical/agent-vault:{{ .Version }}-amd64"
-      - "infisical/agent-vault:{{ .Version }}-arm64"
+      - "ghcr.io/stigenai/agent-vault:{{ .Version }}-amd64"
+      - "ghcr.io/stigenai/agent-vault:{{ .Version }}-arm64"
 
-  - name_template: "infisical/agent-vault:latest"
+  - name_template: "ghcr.io/stigenai/agent-vault:latest"
     image_templates:
-      - "infisical/agent-vault:{{ .Version }}-amd64"
-      - "infisical/agent-vault:{{ .Version }}-arm64"
+      - "ghcr.io/stigenai/agent-vault:{{ .Version }}-amd64"
+      - "ghcr.io/stigenai/agent-vault:{{ .Version }}-arm64"
 
 release:
   github:
-    owner: Infisical
+    owner: stigenai
     name: agent-vault
   draft: false
   prerelease: auto
@@ -139,12 +139,12 @@ release:
     # Verify signature (requires cosign v2+)
     cosign verify-blob \
       --bundle checksums.txt.sig \
-      --certificate-identity-regexp "^https://github\.com/Infisical/agent-vault/\.github/workflows/release\.yml@refs/tags/" \
+      --certificate-identity-regexp "^https://github\.com/stigenai/agent-vault/\.github/workflows/release\.yml@refs/tags/" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       checksums.txt
 
     # Verify Docker image signature (requires cosign)
-    cosign verify infisical/agent-vault:{{ .Version }} \
-      --certificate-identity-regexp "^https://github\.com/Infisical/agent-vault/\.github/workflows/release\.yml@refs/tags/" \
+    cosign verify ghcr.io/stigenai/agent-vault:{{ .Version }} \
+      --certificate-identity-regexp "^https://github\.com/stigenai/agent-vault/\.github/workflows/release\.yml@refs/tags/" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
     ```

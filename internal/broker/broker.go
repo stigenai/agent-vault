@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -83,7 +84,7 @@ func (s *Service) IsEnabled() bool {
 // client's request headers flow through (minus broker-scoped headers
 // like X-Vault and Proxy-Authorization, and hop-by-hop headers).
 type Auth struct {
-	Type string `yaml:"type" json:"type"` // "bearer", "basic", "api-key", "custom", "passthrough"
+	Type string `yaml:"type" json:"type"` // "bearer", "basic", "api-key", "custom", "oauth2-client-credentials", "passthrough"
 
 	// type: bearer — token credential key
 	Token string `yaml:"token,omitempty" json:"token,omitempty"`
@@ -99,10 +100,19 @@ type Auth struct {
 
 	// type: custom — arbitrary header templates with {{ CREDENTIAL }} placeholders
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// type: oauth2-client-credentials — provider-backed client identity,
+	// fixed HTTPS token endpoint, exact scopes, and optional supplemental
+	// header templates (for example Cloudflare Access service headers).
+	ClientID        string   `yaml:"client_id,omitempty" json:"client_id,omitempty"`
+	ClientSecret    string   `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`
+	TokenURL        string   `yaml:"token_url,omitempty" json:"token_url,omitempty"`
+	Scopes          []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	TokenAuthMethod string   `yaml:"token_auth_method,omitempty" json:"token_auth_method,omitempty"`
 }
 
 // SupportedAuthTypes lists the valid auth type values.
-var SupportedAuthTypes = []string{"bearer", "basic", "api-key", "custom", "passthrough"}
+var SupportedAuthTypes = []string{"bearer", "basic", "api-key", "custom", "oauth2-client-credentials", "passthrough"}
 
 // CredentialKeyPattern validates credential key names: UPPER_SNAKE_CASE.
 var CredentialKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
@@ -199,6 +209,42 @@ func (a *Auth) Validate() error {
 		}
 		return nil
 
+	case "oauth2-client-credentials":
+		if a.ClientID == "" || a.ClientSecret == "" || a.TokenURL == "" || len(a.Scopes) == 0 {
+			return fmt.Errorf("auth: client_id, client_secret, token_url, and scopes are required for oauth2-client-credentials auth")
+		}
+		if err := checkUnexpectedFields(a, "oauth2-client-credentials", "client_id", "client_secret", "token_url", "scopes", "token_auth_method", "headers"); err != nil {
+			return err
+		}
+		if err := validateCredentialKey("client_id", a.ClientID); err != nil {
+			return err
+		}
+		if err := validateCredentialKey("client_secret", a.ClientSecret); err != nil {
+			return err
+		}
+		if err := validateOAuthTokenURL(a.TokenURL); err != nil {
+			return err
+		}
+		for _, scope := range a.Scopes {
+			if scope == "" || strings.TrimSpace(scope) != scope || strings.ContainsAny(scope, " \t\r\n\x00") {
+				return fmt.Errorf("auth: invalid OAuth scope %q", scope)
+			}
+		}
+		if a.TokenAuthMethod != "" && a.TokenAuthMethod != "client_secret_basic" && a.TokenAuthMethod != "client_secret_post" {
+			return fmt.Errorf("auth: token_auth_method must be client_secret_basic or client_secret_post")
+		}
+		if len(a.Headers) > 0 {
+			for name := range a.Headers {
+				if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Proxy-Authorization") {
+					return fmt.Errorf("auth: supplemental OAuth headers cannot set %q", name)
+				}
+			}
+			if err := (&Auth{Type: "custom", Headers: a.Headers}).Validate(); err != nil {
+				return fmt.Errorf("auth: invalid supplemental OAuth headers: %w", err)
+			}
+		}
+		return nil
+
 	case "passthrough":
 		// Passthrough forwards client headers unchanged and injects nothing.
 		// No credential fields are permitted.
@@ -213,6 +259,14 @@ func (a *Auth) Validate() error {
 func validateCredentialKey(field, key string) error {
 	if !CredentialKeyPattern.MatchString(key) {
 		return fmt.Errorf("auth: %s %q must be UPPER_SNAKE_CASE (e.g. STRIPE_KEY)", field, key)
+	}
+	return nil
+}
+
+func validateOAuthTokenURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("auth: token_url must be an absolute HTTPS URL without userinfo or fragment")
 	}
 	return nil
 }
@@ -236,6 +290,11 @@ func checkUnexpectedFields(a *Auth, authType string, allowed ...string) error {
 		{"header", a.Header != ""},
 		{"prefix", a.Prefix != ""},
 		{"headers", len(a.Headers) > 0},
+		{"client_id", a.ClientID != ""},
+		{"client_secret", a.ClientSecret != ""},
+		{"token_url", a.TokenURL != ""},
+		{"scopes", len(a.Scopes) > 0},
+		{"token_auth_method", a.TokenAuthMethod != ""},
 	}
 
 	for _, c := range checks {
@@ -267,6 +326,14 @@ func (a *Auth) CredentialKeys() []string {
 		return []string{a.Key}
 	case "custom":
 		return credentialKeysFromHeaders(a.Headers)
+	case "oauth2-client-credentials":
+		keys := []string{a.ClientID, a.ClientSecret}
+		for _, key := range credentialKeysFromHeaders(a.Headers) {
+			if key != a.ClientID && key != a.ClientSecret {
+				keys = append(keys, key)
+			}
+		}
+		return keys
 	case "passthrough":
 		return nil
 	default:
@@ -329,6 +396,9 @@ func (a *Auth) Resolve(getCredential func(key string) (string, error)) (map[stri
 
 	case "custom":
 		return resolveHeaders(a.Headers, getCredential)
+
+	case "oauth2-client-credentials":
+		return nil, fmt.Errorf("oauth2-client-credentials auth requires contextual token minting")
 
 	case "passthrough":
 		// Passthrough injects nothing. Callers should branch on the service

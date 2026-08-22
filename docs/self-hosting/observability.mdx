@@ -1,0 +1,71 @@
+---
+title: "Fleet observability"
+description: "Scrape bounded-cardinality broker and relay metrics, consume safe events, and install operational alerts"
+---
+
+## Enable authenticated broker metrics
+
+Operational metrics are separate from anonymous product telemetry. Enable them in the shared server TOML while leaving product telemetry disabled if required:
+
+```toml
+[telemetry]
+enabled = false
+metrics_enabled = true
+```
+
+The broker serves `GET /metrics` on its API listener. The route uses the same authentication chain as the control plane and is absent when disabled. In SPIFFE-only mode, give the collector a rotating SVID and bind its exact SPIFFE ID to an active Agent Vault agent. The collector sends no bearer token. A SPIFFE-aware collector, Envoy SDS integration, or SPIRE helper may provide the mTLS client certificate; never create a durable monitoring token.
+
+The API listener validates the collector's SVID before HTTP authentication. NetworkPolicy should additionally restrict the API port to monitoring and operator namespaces.
+
+## Enable relay metrics
+
+Relays can expose a separate metrics listener:
+
+```toml
+[relay]
+listen_address = "0.0.0.0:14322"
+remote_address = "agent-vault.agent-vault.svc.cluster.local:14322"
+listener_mode = "network"
+metrics_address = "0.0.0.0:9464"
+```
+
+The relay metrics listener always uses SPIFFE mTLS and accepts only peers in the configured trust domains. A non-loopback metrics address requires `listener_mode = "network"`; protect both listener ports with default-deny NetworkPolicy. `AGENT_VAULT_RELAY_METRICS_ADDRESS` is the environment override.
+
+## Metrics and safe dimensions
+
+| Area | Metrics |
+|---|---|
+| Database and encryption | `agent_vault_database_up`, `agent_vault_dek_unwrap_up` |
+| Workload identity | `agent_vault_spiffe_svid_up`, `agent_vault_spiffe_svid_seconds_until_expiry`, relay equivalents |
+| Provider freshness | `agent_vault_secret_sources`, `agent_vault_secret_source_seconds_until_stale`, `agent_vault_secret_source_oldest_success_age_seconds` |
+| Refresh execution | `agent_vault_secret_refresh_cycles_total`, `agent_vault_secret_refresh_cycle_errors_total`, `agent_vault_secret_refresh_source_failures_total` |
+| Fleet reconcile | `agent_vault_fleet_reconcile_success_total`, `agent_vault_fleet_reconcile_conflicts_total`, `agent_vault_fleet_reconcile_failures_total` |
+| Relay connectivity | `agent_vault_relay_active_connections`, `agent_vault_relay_dial_success_total`, `agent_vault_relay_dial_failures_total` |
+
+Only two bounded label enums exist: database `backend` (`postgres`, `sqlite`, or `unknown`) and source `health` (`pending`, `ok`, `error`, or `stale`). Metrics never contain SPIFFE IDs, vault or agent names, credential keys, provider names, provider references, DSNs, tokens, error text, payloads, or secret values.
+
+## Structured operational events
+
+Logs use fixed `event` and `outcome` fields. They include counts where useful but omit actor, resource, provider, and endpoint identifiers.
+
+| Event | Outcomes |
+|---|---|
+| `dek_unwrap` | `ready` |
+| `spiffe_identity` | `ready`, `unavailable` |
+| `secret_refresh` | `complete`, `scheduler_error` |
+| `fleet_reconcile` | `success`, `conflict`, `revision_conflict`, `apply_failed` |
+| `relay_connectivity` | `connected`, `dial_failed` |
+
+Treat a missing startup `dek_unwrap=ready` event as startup failure; the HTTP listener is created only after unwrap and sentinel verification succeed. Alert primarily from metrics and Kubernetes probes, using events for diagnosis.
+
+## Install dashboard and alert examples
+
+The optional Kubernetes overlay contains a Grafana dashboard ConfigMap and PrometheusRule groups for missing scrapes, SVID expiry, database and DEK health, provider fail-close windows, refresh failures, reconcile conflicts, and relay connectivity:
+
+```bash
+kubectl apply -k examples/kubernetes/fleet/observability
+```
+
+The overlay does not create a collector because SPIFFE integration differs by monitoring stack. Configure the collector to scrape broker `/metrics` on the `api` service port and relay `/metrics` on its configured metrics port using its live SVID. See the [fleet example instructions](https://github.com/stigenai/agent-vault/tree/main/examples/kubernetes/fleet/observability).
+
+Before rollout, test the warning rules by shortening an SVID TTL and a provider max-staleness window in a non-production environment. Test critical rules by denying the corresponding dependency, then confirm recovery clears the alert without restarting healthy components.

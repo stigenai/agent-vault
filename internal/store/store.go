@@ -3,13 +3,59 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // ErrNotFirstUser is returned by RegisterFirstUser when users already exist.
 var ErrNotFirstUser = errors.New("users already exist; not first user")
+
+const (
+	ManagedResourceVault      = "vault"
+	ManagedResourceAgent      = "agent"
+	ManagedResourceGrant      = "grant"
+	ManagedResourceService    = "service"
+	ManagedResourceCredential = "credential"
+)
+
+// ManagedResourceKey uses stable database IDs where available. ScopeID is
+// empty for instance resources, the vault ID for scoped resources, and
+// ResourceID is a vault/agent ID or a scoped service/credential identity.
+type ManagedResourceKey struct {
+	Kind       string
+	ScopeID    string
+	ResourceID string
+}
+
+// ManagedResource records declarative ownership and its optimistic revision.
+// Rows exist only for resources adopted by a manager; absence means unmanaged
+// at revision zero.
+type ManagedResource struct {
+	ManagedResourceKey
+	Manager   string
+	Revision  int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ManagedResourceConflict is safe to return through reconciliation APIs. It
+// contains resource identities and ownership metadata, never resource specs or
+// credential values.
+type ManagedResourceConflict struct {
+	Key              ManagedResourceKey
+	ExpectedManager  string
+	ExpectedRevision int64
+	ActualManager    string
+	ActualRevision   int64
+}
+
+func (e *ManagedResourceConflict) Error() string {
+	return fmt.Sprintf("managed %s %q revision conflict: expected manager %q revision %d, found manager %q revision %d",
+		e.Key.Kind, e.Key.ResourceID, e.ExpectedManager, e.ExpectedRevision, e.ActualManager, e.ActualRevision)
+}
 
 // DefaultVault is the name of the automatically-seeded vault.
 const DefaultVault = "default"
@@ -116,6 +162,63 @@ type MasterKeyRecord struct {
 	KDFMemory     *uint32
 	KDFThreads    *uint8
 	CreatedAt     time.Time
+}
+
+const (
+	DEKWrappingPrimary = "primary"
+	DEKWrappingActive  = "active"
+	DEKWrappingRetired = "retired"
+)
+
+// DEKWrappingRecord stores ciphertext plus deliberately narrow public provider
+// identity. Provider credentials and plaintext DEKs have no representation in
+// this record.
+type DEKWrappingRecord struct {
+	ID         string
+	Provider   string
+	KeyID      string
+	KeyVersion string
+	WrappedDEK []byte
+	Status     string
+	VerifiedAt time.Time
+	CreatedAt  time.Time
+	RetiredAt  *time.Time
+}
+
+type DEKWrappingStore interface {
+	InsertDEKWrapping(ctx context.Context, record *DEKWrappingRecord) error
+	ListDEKWrappings(ctx context.Context, includeRetired bool) ([]DEKWrappingRecord, error)
+	GetPrimaryDEKWrapping(ctx context.Context) (*DEKWrappingRecord, error)
+}
+
+type KeyWrappingStore interface {
+	DEKWrappingStore
+	GetMasterKeyRecord(context.Context) (*MasterKeyRecord, error)
+	GetOrCreateSetting(context.Context, string, string) (string, error)
+	PromoteDEKWrapping(context.Context, string, bool) error
+}
+
+// KeyRecoveryEvent is deliberately limited to public routing and actor
+// metadata. It never contains a DEK, wrapping ciphertext, identity text, or
+// provider response.
+type KeyRecoveryEvent struct {
+	ID                   string
+	ActorID              string
+	ActorSPIFFEID        string
+	RecoveryWrappingID   string
+	RecoveryProvider     string
+	RecoveryKeyID        string
+	NewPrimaryWrappingID string
+	NewPrimaryProvider   string
+	NewPrimaryKeyID      string
+	NewPrimaryKeyVersion string
+	CreatedAt            time.Time
+}
+
+type KeyRecoveryStore interface {
+	KeyWrappingStore
+	PromoteDEKWrappingWithRecoveryAudit(context.Context, string, KeyRecoveryEvent) error
+	ListKeyRecoveryEvents(context.Context, int) ([]KeyRecoveryEvent, error)
 }
 
 // Session represents an authenticated session.
@@ -241,6 +344,95 @@ type EncryptedKV struct {
 	Nonce      []byte
 }
 
+const (
+	CredentialSourceModeReference = "reference"
+
+	CredentialSourceAWSSecretsManager = "aws-secrets-manager"
+	CredentialSourceOpenBaoKV2        = "openbao-kv-v2"
+	CredentialSourceOnePassword       = "onepassword-connect"
+	CredentialSourceInfisical         = "infisical"
+
+	CredentialSourceHealthPending = "pending"
+	CredentialSourceHealthOK      = "ok"
+	CredentialSourceHealthError   = "error"
+	CredentialSourceHealthStale   = "stale"
+)
+
+// CredentialSource contains only reference and refresh metadata. The current
+// encrypted last-known-good value remains in credentials.ciphertext/nonce.
+// Local and one-time imported credentials deliberately have no source row.
+type CredentialSource struct {
+	VaultID                string
+	CredentialKey          string
+	Mode                   string
+	Kind                   string
+	ProviderName           string
+	Reference              string
+	RefreshIntervalSeconds int
+	MaxStalenessSeconds    int
+	ProviderVersion        string
+	Health                 string
+	LastErrorCode          string
+	CacheUpdatedAt         *time.Time
+	LastRefreshAt          *time.Time
+	LastSuccessAt          *time.Time
+	NextRefreshAt          *time.Time
+	RefreshFailures        int
+	ClaimOwner             string
+	ClaimUntil             *time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+}
+
+type CredentialSourceStore interface {
+	SetCredentialSource(context.Context, CredentialSource) (*CredentialSource, error)
+	GetCredentialSource(context.Context, string, string) (*CredentialSource, error)
+	ListCredentialSources(context.Context, string) ([]CredentialSource, error)
+	DeleteCredentialSource(context.Context, string, string) error
+}
+
+type CredentialRefreshStore interface {
+	CredentialSourceStore
+	ClaimCredentialSources(context.Context, string, time.Time, time.Duration, int) ([]CredentialSource, error)
+	CompleteCredentialRefresh(context.Context, CredentialRefreshCompletion) (bool, error)
+	FailCredentialRefresh(context.Context, CredentialRefreshFailure) (bool, error)
+}
+
+type CredentialRefreshCompletion struct {
+	VaultID         string
+	CredentialKey   string
+	ClaimOwner      string
+	ProviderVersion string
+	Ciphertext      []byte
+	Nonce           []byte
+	ValueChanged    bool
+	RefreshedAt     time.Time
+	NextRefreshAt   time.Time
+}
+
+type CredentialRefreshFailure struct {
+	VaultID       string
+	CredentialKey string
+	ClaimOwner    string
+	ErrorCode     string
+	Health        string
+	AttemptedAt   time.Time
+	NextRefreshAt time.Time
+}
+
+var ErrCredentialStale = errors.New("credential reference cache is stale or unavailable")
+
+func CredentialSourceUsable(source *CredentialSource, now time.Time) bool {
+	if source == nil || source.LastSuccessAt == nil || source.CacheUpdatedAt == nil {
+		return false
+	}
+	if source.MaxStalenessSeconds == 0 {
+		return source.Kind == CredentialSourceInfisical && strings.HasPrefix(source.ProviderName, "legacy-infisical-")
+	}
+	return now.Before(source.LastSuccessAt.Add(time.Duration(source.MaxStalenessSeconds)*time.Second)) ||
+		now.Equal(source.LastSuccessAt.Add(time.Duration(source.MaxStalenessSeconds)*time.Second))
+}
+
 // Wire-protocol values for VaultCredentialStore.Kind. KindBuiltin is the
 // API sentinel for "no external store" and is never persisted.
 const (
@@ -354,6 +546,7 @@ type UnmatchedHost struct {
 type Agent struct {
 	ID        string
 	Name      string
+	SPIFFEID  string // exact workload identity; empty for legacy token-only agents
 	Role      string // "owner", "member", or "no-access" (instance-level role, like users)
 	Status    string // "active" or "revoked"
 	CreatedBy string // user ID of the creator
@@ -367,6 +560,41 @@ type Agent struct {
 type AgentVaultGrantSpec struct {
 	VaultID string
 	Role    string
+}
+
+// SPIFFEOwnerBootstrap records the immutable result of the one-time SPIFFE
+// owner bootstrap claim.
+type SPIFFEOwnerBootstrap struct {
+	Applied       bool
+	ConfiguredIDs []string
+	OwnerCount    int
+	SPIFFEOwners  int
+}
+
+// AuthMigrationInventory is secret-free state used to gate a staged move from
+// legacy bearer/password authentication to SPIFFE-only authentication.
+// Persisted sessions include user logins, vault-scoped tokens, and agent
+// tokens; SPIFFE authentication does not create session rows.
+type AuthMigrationInventory struct {
+	Users                   int
+	ActiveAgents            int
+	UnboundActiveAgentNames []string
+	PersistedUserSessions   int
+	PersistedAgentSessions  int
+	PersistedScopedSessions int
+	ActiveSPIFFEOwners      int
+}
+
+func (i AuthMigrationInventory) PersistedSessions() int {
+	return i.PersistedUserSessions + i.PersistedAgentSessions + i.PersistedScopedSessions
+}
+
+// AuthMigrationStore provides the two deliberately explicit operations used
+// by the authentication migration API. Revocation deletes persisted sessions
+// only; it does not delete users, agents, SPIFFE bindings, or vault grants.
+type AuthMigrationStore interface {
+	InspectAuthMigration(context.Context) (AuthMigrationInventory, error)
+	RevokeLegacySessions(context.Context) (int64, error)
 }
 
 // UserInvite represents an instance-level invitation for a new user.
@@ -424,6 +652,12 @@ type CAState struct {
 // Store is the persistence interface for Agent Vault.
 // All methods are safe for concurrent use.
 type Store interface {
+	// Declarative ownership. An absent row means unmanaged revision zero.
+	GetManagedResource(ctx context.Context, key ManagedResourceKey) (*ManagedResource, error)
+	ListManagedResources(ctx context.Context) ([]ManagedResource, error)
+	CompareAndSwapManagedResource(ctx context.Context, key ManagedResourceKey, manager string, expectedRevision int64) (*ManagedResource, error)
+	ReleaseManagedResource(ctx context.Context, key ManagedResourceKey, manager string, expectedRevision int64) error
+
 	// Vaults
 	CreateVault(ctx context.Context, name string) (*Vault, error)
 	GetVault(ctx context.Context, name string) (*Vault, error)
@@ -437,6 +671,9 @@ type Store interface {
 	GetCredential(ctx context.Context, vaultID, key string) (*Credential, error)
 	ListCredentials(ctx context.Context, vaultID string) ([]Credential, error)
 	DeleteCredential(ctx context.Context, vaultID, key string) error
+	SetCredentialSource(ctx context.Context, source CredentialSource) (*CredentialSource, error)
+	ListCredentialSources(ctx context.Context, vaultID string) ([]CredentialSource, error)
+	DeleteCredentialSource(ctx context.Context, vaultID, credentialKey string) error
 
 	// OAuth credentials
 	GetCredentialOAuth(ctx context.Context, vaultID, key string) (*CredentialOAuth, error)
@@ -552,12 +789,14 @@ type Store interface {
 	// CreateAgentWithGrantsAndToken creates an agent, its vault grants, and its
 	// first agent token in a single transaction so partial failures cannot strand
 	// an agent row without a token or with half-applied grants.
-	CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*Agent, *Session, error)
+	CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*Agent, *Session, error)
 	GetAgentByID(ctx context.Context, id string) (*Agent, error)
+	GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*Agent, error)
 	GetAgentNameByID(ctx context.Context, id string) (string, error)
 	GetAgentByName(ctx context.Context, name string) (*Agent, error)
 	ListAgents(ctx context.Context, vaultID string) ([]Agent, error)
 	ListAllAgents(ctx context.Context) ([]Agent, error)
+	UpdateAgentSPIFFEID(ctx context.Context, agentID, spiffeID string) error
 	RevokeAgent(ctx context.Context, id string) error
 	DeleteAgent(ctx context.Context, id string) error
 	RenameAgent(ctx context.Context, id string, newName string) error
@@ -570,6 +809,7 @@ type Store interface {
 	RotateAgentToken(ctx context.Context, agentID string, tokenExpiresAt *time.Time) (*Session, error)
 	CreateAgentToken(ctx context.Context, agentID string, expiresAt *time.Time) (*Session, error)
 	CountAllOwners(ctx context.Context) (int, error)
+	BootstrapSPIFFEOwners(ctx context.Context, spiffeIDs []string) (SPIFFEOwnerBootstrap, error)
 
 	// Instance settings
 	GetSetting(ctx context.Context, key string) (string, error)

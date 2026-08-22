@@ -24,8 +24,8 @@ const (
 	// SettingKey is the instance_settings key holding the JSON payload.
 	SettingKey = "logs_retention"
 
-	envMaxAgeHours  = "AGENT_VAULT_LOGS_MAX_AGE_HOURS"
-	envMaxRows      = "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT"
+	envMaxAgeHours   = "AGENT_VAULT_LOGS_MAX_AGE_HOURS"
+	envMaxRows       = "AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT"
 	envRetentionLock = "AGENT_VAULT_LOGS_RETENTION_LOCK"
 )
 
@@ -91,6 +91,29 @@ func ResolveRetention(ctx context.Context, s retentionStore) RetentionConfig {
 	return cfg
 }
 
+// ResolveRetentionConfigured layers the mutable instance setting over a
+// runtime configuration already resolved from defaults, TOML, environment,
+// and flags. When locked, the database setting is ignored.
+func ResolveRetentionConfigured(ctx context.Context, s retentionStore, base RetentionConfig, locked bool) RetentionConfig {
+	if base.Tick <= 0 {
+		base.Tick = DefaultRetentionTick
+	}
+	if locked {
+		return base
+	}
+	payload, present, err := loadRetentionSetting(ctx, s)
+	if err != nil || !present {
+		return base
+	}
+	if payload.MaxAgeHours != nil {
+		base.MaxAge = time.Duration(*payload.MaxAgeHours * float64(time.Hour))
+	}
+	if payload.MaxRowsPerVault != nil {
+		base.MaxRowsPerVault = *payload.MaxRowsPerVault
+	}
+	return base
+}
+
 type envRetentionMask struct {
 	age, rows bool
 }
@@ -152,6 +175,26 @@ func RunRetention(ctx context.Context, s store.Store, logger *slog.Logger) {
 		case <-ticker.C:
 			cfg = ResolveRetention(ctx, s)
 			trimOnce(ctx, s, logger, cfg)
+		}
+	}
+}
+
+// RunRetentionConfigured runs retention without consulting process
+// environment after startup.
+func RunRetentionConfigured(ctx context.Context, s store.Store, logger *slog.Logger, base RetentionConfig, locked bool) {
+	for {
+		cfg := ResolveRetentionConfigured(ctx, s, base, locked)
+		trimOnce(ctx, s, logger, cfg)
+		tick := cfg.Tick
+		if tick <= 0 {
+			tick = DefaultRetentionTick
+		}
+		timer := time.NewTimer(tick)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
 }

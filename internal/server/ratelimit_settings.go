@@ -31,7 +31,6 @@ type rateLimitTierOverride struct {
 	Concurrency *int     `json:"concurrency,omitempty"`
 }
 
-
 // loadRateLimitSetting returns the parsed setting payload, or a
 // zero-value payload if the setting is absent.
 func loadRateLimitSetting(ctx context.Context, s Store) (rateLimitSettingPayload, bool, error) {
@@ -59,6 +58,10 @@ func loadRateLimitSetting(ctx context.Context, s Store) (rateLimitSettingPayload
 // callers can render per-tier "source" without re-scanning os.Getenv.
 func resolveRateLimitConfig(ctx context.Context, s Store) (ratelimit.Config, rateLimitSettingPayload, bool, ratelimit.EnvMasks, error) {
 	envCfg, envMask := ratelimit.LoadFromEnv()
+	return resolveRateLimitConfigWithBase(ctx, s, envCfg, envMask)
+}
+
+func resolveRateLimitConfigWithBase(ctx context.Context, s Store, envCfg ratelimit.Config, envMask ratelimit.EnvMasks) (ratelimit.Config, rateLimitSettingPayload, bool, ratelimit.EnvMasks, error) {
 	if envCfg.Locked {
 		return envCfg, rateLimitSettingPayload{}, false, envMask, nil
 	}
@@ -149,7 +152,7 @@ func rateLimitSourceForTier(t ratelimit.Tier, payload rateLimitSettingPayload, h
 // reloads the registry. Called once at server startup and again after
 // every write to the settings pane. Returns the effective config.
 func (s *Server) applyRateLimitSettingToRegistry(ctx context.Context) (ratelimit.Config, error) {
-	cfg, _, _, _, err := resolveRateLimitConfig(ctx, s.store)
+	cfg, _, _, _, err := resolveRateLimitConfigWithBase(ctx, s.store, s.rateLimitBase, s.rateLimitEnvMasks)
 	if err != nil {
 		return cfg, err
 	}
@@ -175,7 +178,7 @@ type tierJSON struct {
 // error; the rest of the settings response degrades without the
 // rate-limit block.
 func (s *Server) buildRateLimitSettingResponse(ctx context.Context) map[string]interface{} {
-	cfg, payload, hasPayload, envMask, err := resolveRateLimitConfig(ctx, s.store)
+	cfg, payload, hasPayload, envMask, err := resolveRateLimitConfigWithBase(ctx, s.store, s.rateLimitBase, s.rateLimitEnvMasks)
 	if err != nil {
 		return nil
 	}
@@ -219,7 +222,7 @@ func (s *Server) handleRateLimitPreview(w http.ResponseWriter, r *http.Request) 
 	if _, err := s.requireOwnerActor(w, r); err != nil {
 		return
 	}
-	envCfg, envMask := ratelimit.LoadFromEnv()
+	envCfg, envMask := s.rateLimitBase, s.rateLimitEnvMasks
 	if envCfg.Locked {
 		jsonError(w, http.StatusConflict, "Rate-limit config is pinned by operator env var")
 		return
@@ -286,7 +289,7 @@ func (s *Server) handleUpdateRateLimitSetting(ctx context.Context, p *rateLimitS
 			}
 		}
 	}
-	envCfg, envMask := ratelimit.LoadFromEnv()
+	envCfg, envMask := s.rateLimitBase, s.rateLimitEnvMasks
 	candidate := applyPayload(envCfg, envMask, *p)
 	if err := candidate.Validate(); err != nil {
 		return err

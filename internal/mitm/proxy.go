@@ -28,8 +28,8 @@ package mitm
 
 import (
 	"context"
-	"log/slog"
 	"crypto/tls"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -40,6 +40,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/netguard"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
+	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
 // Proxy is a transparent MITM proxy. It is safe to start at most once;
@@ -47,6 +48,8 @@ import (
 type Proxy struct {
 	ca               ca.Provider
 	sessions         brokercore.SessionResolver
+	peers            brokercore.AgentResolver
+	agents           workloadidentity.AgentLookup
 	creds            brokercore.CredentialProvider
 	httpServer       *http.Server
 	upstream         *http.Transport
@@ -57,6 +60,8 @@ type Proxy struct {
 	logSink          requestlog.Sink     // never nil (Nop default); shared with the HTTP server
 	maxResponseBytes int64               // 0 = unlimited
 	maxRequestBytes  int64
+	tlsConfig        *tls.Config
+	spiffeOnly       bool
 }
 
 // Options carries the dependencies a Proxy needs. BaseURL is the
@@ -66,22 +71,33 @@ type Proxy struct {
 // server so proxy limits and control-plane limits live in one registry;
 // nil disables rate limiting on the MITM path.
 type Options struct {
-	CA               ca.Provider
-	Sessions         brokercore.SessionResolver
-	Credentials      brokercore.CredentialProvider
-	BaseURL          string
-	Logger           *slog.Logger
-	RateLimit        *ratelimit.Registry
-	LogSink          requestlog.Sink // nil → Nop
-	MaxResponseBytes int64           // 0 = unlimited (default); >0 = cap in bytes
-	MaxRequestBytes  int64           // 0 → DefaultMaxRequestBytes (1 GiB)
+	Peers                   brokercore.AgentResolver
+	Agents                  workloadidentity.AgentLookup
+	TLSConfig               *tls.Config
+	SPIFFEOnly              bool
+	CA                      ca.Provider
+	Sessions                brokercore.SessionResolver
+	Credentials             brokercore.CredentialProvider
+	BaseURL                 string
+	Logger                  *slog.Logger
+	RateLimit               *ratelimit.Registry
+	LogSink                 requestlog.Sink // nil → Nop
+	MaxResponseBytes        int64           // 0 = unlimited (default); >0 = cap in bytes
+	MaxRequestBytes         int64           // 0 → DefaultMaxRequestBytes (1 GiB)
+	AllowPrivateRanges      bool
+	NetworkAllowlist        []net.IPNet
+	NetworkPolicyConfigured bool
 }
 
 // New builds a Proxy bound to addr. The returned Proxy does not begin
 // listening until ListenAndServe is called.
 func New(addr string, opts Options) *Proxy {
+	dialContext := netguard.SafeDialContext(netguard.AllowPrivateFromEnv())
+	if opts.NetworkPolicyConfigured {
+		dialContext = netguard.SafeDialContextWithAllowlist(opts.AllowPrivateRanges, opts.NetworkAllowlist)
+	}
 	upstream := &http.Transport{
-		DialContext:           netguard.SafeDialContext(netguard.AllowPrivateFromEnv()),
+		DialContext:           dialContext,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          100,
@@ -103,6 +119,8 @@ func New(addr string, opts Options) *Proxy {
 	p := &Proxy{
 		ca:               opts.CA,
 		sessions:         opts.Sessions,
+		peers:            opts.Peers,
+		agents:           opts.Agents,
 		creds:            opts.Credentials,
 		upstream:         upstream,
 		baseURL:          opts.BaseURL,
@@ -111,6 +129,8 @@ func New(addr string, opts Options) *Proxy {
 		logSink:          sink,
 		maxResponseBytes: opts.MaxResponseBytes, // 0 = unlimited
 		maxRequestBytes:  maxReq,
+		tlsConfig:        opts.TLSConfig,
+		spiffeOnly:       opts.SPIFFEOnly,
 	}
 
 	p.httpServer = &http.Server{
@@ -148,16 +168,39 @@ func (p *Proxy) ListenAndServe() error {
 	return p.Serve(l)
 }
 
-// Serve accepts connections on the provided listener. The listener
-// itself is plain HTTP (standard forward-proxy convention); TLS is
-// only used inside CONNECT tunnels where the MITM presents a leaf
-// cert to the client. It blocks until Shutdown is called, returning
+// Serve accepts connections on the provided listener. Ingress is plain HTTP
+// by default; when TLSConfig is supplied the outer proxy connection uses TLS.
+// CONNECT tunnels use the MITM leaf certificate independently. It blocks until
+// Shutdown is called, returning
 // http.ErrServerClosed in that case.
 // Useful for tests that need to bind :0 and learn the resulting port.
 func (p *Proxy) Serve(l net.Listener) error {
 	p.isListening.Store(true)
 	defer p.isListening.Store(false)
+	if p.tlsConfig != nil {
+		l = tls.NewListener(l, p.tlsConfig)
+	}
 	return p.httpServer.Serve(l)
+}
+
+func (p *Proxy) authenticateRequest(r *http.Request) (*brokercore.ProxyScope, error) {
+	// A certificate-bearing request never falls back to Proxy-Authorization.
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		agent, err := workloadidentity.AgentFromTLS(r.Context(), r.TLS, p.agents)
+		if err != nil || p.peers == nil {
+			return nil, brokercore.ErrInvalidSession
+		}
+		return p.peers.ResolveAgentForProxy(r.Context(), agent.ID, r.Header.Get("X-Vault"))
+	}
+	if p.spiffeOnly {
+		return nil, brokercore.ErrInvalidSession
+	}
+
+	token, hint, err := brokercore.ParseProxyAuth(r)
+	if err != nil || p.sessions == nil {
+		return nil, brokercore.ErrInvalidSession
+	}
+	return p.sessions.ResolveForProxy(r.Context(), token, hint)
 }
 
 // Shutdown gracefully stops the listener. In-flight CONNECT tunnels are

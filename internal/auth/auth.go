@@ -135,6 +135,20 @@ func UnlockPasswordless(record *VerificationRecord) (*MasterKey, error) {
 	return &MasterKey{key: dek}, nil
 }
 
+// UnlockWithDEK verifies a provider-unwrapped DEK against the legacy sentinel.
+// The returned MasterKey owns a copy; callers may wipe their input immediately.
+func UnlockWithDEK(dek []byte, record *VerificationRecord) (*MasterKey, error) {
+	if len(dek) != 32 || record == nil {
+		return nil, ErrWrongPassword
+	}
+	copyOfDEK := append([]byte(nil), dek...)
+	if err := verifySentinel(copyOfDEK, record.Sentinel, record.SentinelNonce); err != nil {
+		crypto.WipeBytes(copyOfDEK)
+		return nil, err
+	}
+	return &MasterKey{key: copyOfDEK}, nil
+}
+
 // WrapDEK wraps a DEK under a new KEK derived from the password.
 // Returns the salt, wrapped DEK ciphertext, nonce, and KDF params.
 func WrapDEK(dek, password []byte) (salt, dekCT, dekNonce []byte, params crypto.KDFParams, err error) {

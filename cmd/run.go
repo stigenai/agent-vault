@@ -6,19 +6,22 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
-	"time"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	runtimeconfig "github.com/Infisical/agent-vault/internal/config"
 	"github.com/Infisical/agent-vault/internal/isolation"
+	localrelay "github.com/Infisical/agent-vault/internal/relay"
 	"github.com/Infisical/agent-vault/internal/session"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
@@ -90,6 +93,9 @@ Example:
 	c.Flags().Bool("no-firewall", false, "Skip iptables egress rules inside the container (requires --isolation=container; debug only)")
 	c.Flags().Bool("home-volume-shared", false, "Share /home/claude/.claude across invocations (requires --isolation=container); default is a per-invocation volume, losing auth state but avoiding concurrency corruption")
 	c.Flags().Bool("share-agent-dir", false, "Bind-mount the host's agent state dir (~/.claude) into the container so it reuses your host login (requires --isolation=container; mutually exclusive with --home-volume-shared)")
+	c.Flags().String("config", "", "path to versioned TOML configuration")
+	c.Flags().String("relay-listen", "", "override workload relay loopback address")
+	c.Flags().String("relay-remote", "", "override central SPIFFE proxy host:port")
 
 	return c
 }
@@ -123,6 +129,17 @@ func runCmdRunE(cmd *cobra.Command, args []string) error {
 	sess, tokenSource, err := resolveSession()
 	if err != nil {
 		return err
+	}
+	if sess.WorkloadIdentity {
+		if mode != IsolationHost {
+			return fmt.Errorf("workload identity relay supports host isolation only; use an isolated Kubernetes relay pod instead of --isolation=container")
+		}
+		if cmd.Flags().Changed("ttl") {
+			return fmt.Errorf("--ttl is not applicable to SPIFFE workload identity")
+		}
+		captureRunEvent(args[0], mode, "spiffe")
+		tel.Close()
+		return runWithWorkloadRelay(cmd, args, sess.Address)
 	}
 	fromEnv := tokenSource != ""
 
@@ -223,6 +240,133 @@ func runCmdRunE(cmd *cobra.Command, args []string) error {
 	// user-specified binary with user-specified args, identical to the
 	// rationale for the G204 exclusion in .golangci.yml.
 	return syscall.Exec(binary, args, env) //nolint:gosec
+}
+
+var workloadChildSensitiveEnv = map[string]struct{}{
+	"AGENT_VAULT_CONFIG": {}, "SPIFFE_ENDPOINT_SOCKET": {}, "AGENT_VAULT_SPIFFE_TRUST_DOMAINS": {},
+	"AWS_ACCESS_KEY_ID": {}, "AWS_SECRET_ACCESS_KEY": {}, "AWS_SESSION_TOKEN": {}, "AWS_WEB_IDENTITY_TOKEN_FILE": {},
+	"AWS_ROLE_ARN": {}, "AWS_PROFILE": {}, "AWS_SHARED_CREDENTIALS_FILE": {},
+	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": {}, "AWS_CONTAINER_CREDENTIALS_FULL_URI": {},
+	"VAULT_TOKEN": {}, "BAO_TOKEN": {}, "OPENBAO_TOKEN": {}, "OP_CONNECT_TOKEN": {}, "OP_CONNECT_HOST": {},
+}
+
+func runWithWorkloadRelay(cmd *cobra.Command, args []string, address string) error {
+	configPath, _ := cmd.Flags().GetString("config")
+	cfg, err := runtimeconfig.LoadRelay(runtimeconfig.ClientOptions{Path: configPath})
+	if err != nil {
+		return err
+	}
+	if cmd.Flags().Changed("relay-listen") {
+		cfg.Relay.ListenAddress, _ = cmd.Flags().GetString("relay-listen")
+	}
+	if cmd.Flags().Changed("relay-remote") {
+		cfg.Relay.RemoteAddress, _ = cmd.Flags().GetString("relay-remote")
+	}
+	if err := runtimeconfig.ValidateRelay(cfg.Relay); err != nil {
+		return err
+	}
+	domains, err := relayTrustDomains(cfg.Client.TrustDomains)
+	if err != nil {
+		return err
+	}
+	source, err := activeWorkloadIdentitySource()
+	if err != nil {
+		return err
+	}
+	dial, err := localrelay.NewSPIFFEDialContext(localrelay.SPIFFEDialOptions{Source: source, TrustDomains: domains})
+	if err != nil {
+		return err
+	}
+	r, err := localrelay.New(localrelay.Options{RemoteAddr: cfg.Relay.RemoteAddress, DialContext: dial})
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", cfg.Relay.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("listen for workload relay: %w", err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- r.Serve(listener) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.Shutdown(ctx)
+		<-serveDone
+	}()
+
+	env, err := workloadRelayEnv(os.Environ(), address, listener.Addr().String(), "")
+	if err != nil {
+		return err
+	}
+	binary, err := exec.LookPath(args[0])
+	if err != nil {
+		return fmt.Errorf("command not found: %s", args[0])
+	}
+	return runWorkloadChild(cmd.Context(), binary, args[1:], env)
+}
+
+func runWorkloadChild(ctx context.Context, binary string, args, env []string) error {
+	child := exec.Command(binary, args...) //nolint:gosec
+	child.Env = env
+	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := child.Start(); err != nil {
+		return fmt.Errorf("start child: %w", err)
+	}
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	forwardStop := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-signals:
+			_ = child.Process.Signal(sig)
+		case <-ctx.Done():
+			_ = child.Process.Signal(syscall.SIGTERM)
+		case <-forwardStop:
+		}
+	}()
+	err := child.Wait()
+	close(forwardStop)
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return &ExitCodeError{Code: exitErr.ExitCode()}
+	}
+	return err
+}
+
+func workloadRelayEnv(env []string, address, listenAddress, caPath string) ([]string, error) {
+	pem, _, enabled, err := fetchMITMCA(address)
+	if err != nil {
+		return nil, fmt.Errorf("relay CA setup failed: %w", err)
+	}
+	if !enabled {
+		return nil, fmt.Errorf("central proxy is disabled")
+	}
+	if caPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		caPath = filepath.Join(home, ".agent-vault", "mitm-ca.pem")
+	}
+	if err := os.MkdirAll(filepath.Dir(caPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create CA directory: %w", err)
+	}
+	if err := os.WriteFile(caPath, pem, 0o600); err != nil { //nolint:gosec
+		return nil, fmt.Errorf("write CA: %w", err)
+	}
+	host, portText, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return nil, err
+	}
+	env = stripEnvKeys(env, agentVaultInjectedKeys)
+	env = stripEnvKeys(env, workloadChildSensitiveEnv)
+	env = stripEnvKeys(env, mitmInjectedKeys)
+	env = append(env, isolation.BuildProxyEnv(isolation.ProxyEnvParams{Host: host, Port: port, CAPath: caPath})...)
+	return env, nil
 }
 
 // knownAgents maps CLI binary base-names to the (agentName, skillsDir)
@@ -580,7 +724,6 @@ func augmentEnvWithMITM(env []string, addr, token, vault, caPath string) ([]stri
 	if err := os.WriteFile(caPath, pem, 0o600); err != nil { //nolint:gosec
 		return env, 0, false, fmt.Errorf("write CA: %w", err)
 	}
-
 
 	env = stripEnvKeys(env, mitmInjectedKeys)
 	env = append(env, isolation.BuildProxyEnv(isolation.ProxyEnvParams{

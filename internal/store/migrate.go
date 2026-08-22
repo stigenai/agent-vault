@@ -23,12 +23,16 @@ func CountSourceTables(src *SQLStore) ([]TableCount, error) {
 	tables := []string{
 		"instance_settings",
 		"master_key",
+		"dek_wrappings",
+		"key_recovery_events",
 		"vaults",
 		"vault_settings",
 		"users",
 		"agents",
 		"vault_grants",
 		"credentials",
+		"credential_sources",
+		"managed_resources",
 		"credential_oauth",
 		"credential_oauth_states",
 		"broker_configs",
@@ -74,6 +78,7 @@ func CountDestinationData(dst *SQLStore) (string, error) {
 		{"master_key", "SELECT COUNT(*) FROM master_key", nil},
 		{"sessions", "SELECT COUNT(*) FROM sessions", nil},
 		{"credentials", "SELECT COUNT(*) FROM credentials", nil},
+		{"managed_resources", "SELECT COUNT(*) FROM managed_resources", nil},
 	}
 	for _, c := range checks {
 		var n int
@@ -118,12 +123,16 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 	}{
 		{"instance_settings", copyInstanceSettings},
 		{"master_key", copyMasterKey},
+		{"dek_wrappings", copyDEKWrappings},
+		{"key_recovery_events", copyKeyRecoveryEvents},
 		{"vaults", copyVaults},
 		{"vault_settings", copyVaultSettings},
 		{"users", copyUsers},
 		{"agents", copyAgents},
 		{"vault_grants", copyVaultGrants},
 		{"credentials", copyCredentials},
+		{"credential_sources", copyCredentialSources},
+		{"managed_resources", copyManagedResources},
 		{"credential_oauth", copyCredentialOAuth},
 		{"credential_oauth_states", copyCredentialOAuthStates},
 		{"broker_configs", copyBrokerConfigs},
@@ -394,7 +403,7 @@ func copyUsers(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialec
 
 func copyAgents(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
 	rows, err := src.db.QueryContext(ctx,
-		"SELECT id, name, status, created_by, created_at, updated_at, revoked_at, role FROM agents")
+		"SELECT id, name, spiffe_id, status, created_by, created_at, updated_at, revoked_at, role FROM agents")
 	if err != nil {
 		return 0, err
 	}
@@ -403,8 +412,9 @@ func copyAgents(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Diale
 	n := 0
 	for rows.Next() {
 		var id, name, status, createdBy, role string
+		var spiffeID sql.NullString
 		var createdAt, updatedAt, revokedAt interface{}
-		if err := rows.Scan(&id, &name, &status, &createdBy, &createdAt, &updatedAt, &revokedAt, &role); err != nil {
+		if err := rows.Scan(&id, &name, &spiffeID, &status, &createdBy, &createdAt, &updatedAt, &revokedAt, &role); err != nil {
 			return n, err
 		}
 		ca, err := convertTime(createdAt, src.dialect, dstDialect)
@@ -420,8 +430,8 @@ func copyAgents(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Diale
 			return n, fmt.Errorf("converting revoked_at: %w", err)
 		}
 		_, err = tx.ExecContext(ctx,
-			dstDialect.Rebind("INSERT INTO agents (id, name, status, created_by, created_at, updated_at, revoked_at, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
-			id, name, status, createdBy, ca, ua, ra, role,
+			dstDialect.Rebind("INSERT INTO agents (id, name, spiffe_id, status, created_by, created_at, updated_at, revoked_at, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+			id, name, nullableString(spiffeID.String), status, createdBy, ca, ua, ra, role,
 		)
 		if err != nil {
 			return n, err
@@ -491,6 +501,86 @@ func copyCredentials(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect 
 			id, vaultID, key, typ, ct, nonce, ca, ua,
 		)
 		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT vault_id, credential_key, mode, kind,
+		provider_name, reference, refresh_interval_seconds, max_staleness_seconds,
+		provider_version, health, last_error_code, cache_updated_at, last_refresh_at,
+		last_success_at, next_refresh_at, refresh_failures, claim_owner, claim_until,
+		created_at, updated_at FROM credential_sources`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var source CredentialSource
+		var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, claimOwner, claimUntil, createdAt, updatedAt any
+		if err := rows.Scan(&source.VaultID, &source.CredentialKey, &source.Mode, &source.Kind,
+			&source.ProviderName, &source.Reference, &source.RefreshIntervalSeconds,
+			&source.MaxStalenessSeconds, &source.ProviderVersion, &source.Health,
+			&source.LastErrorCode, &cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt,
+			&nextRefreshAt, &source.RefreshFailures, &claimOwner, &claimUntil, &createdAt, &updatedAt); err != nil {
+			return n, err
+		}
+		converted := make([]any, 7)
+		for i, value := range []any{cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, claimUntil, createdAt, updatedAt} {
+			converted[i], err = convertTime(value, src.dialect, dstDialect)
+			if err != nil {
+				return n, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO credential_sources
+			(vault_id, credential_key, mode, kind, provider_name, reference,
+			 refresh_interval_seconds, max_staleness_seconds, provider_version, health,
+			 last_error_code, cache_updated_at, last_refresh_at, last_success_at,
+			 next_refresh_at, refresh_failures, claim_owner, claim_until, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			source.VaultID, source.CredentialKey, source.Mode, source.Kind, source.ProviderName,
+			source.Reference, source.RefreshIntervalSeconds, source.MaxStalenessSeconds,
+			source.ProviderVersion, source.Health, source.LastErrorCode,
+			converted[0], converted[1], converted[2], converted[3], source.RefreshFailures,
+			claimOwner, converted[4], converted[5], converted[6]); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyManagedResources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT resource_kind, scope_id, resource_id, manager,
+		revision, created_at, updated_at FROM managed_resources`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var kind, scopeID, resourceID, manager string
+		var revision int64
+		var createdAt, updatedAt interface{}
+		if err := rows.Scan(&kind, &scopeID, &resourceID, &manager, &revision, &createdAt, &updatedAt); err != nil {
+			return n, err
+		}
+		ca, err := convertTime(createdAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, fmt.Errorf("converting created_at: %w", err)
+		}
+		ua, err := convertTime(updatedAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, fmt.Errorf("converting updated_at: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO managed_resources
+			(resource_kind, scope_id, resource_id, manager, revision, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`),
+			kind, scopeID, resourceID, manager, revision, ca, ua); err != nil {
 			return n, err
 		}
 		n++
@@ -1050,6 +1140,80 @@ func copyDynamicSecretLeases(ctx context.Context, src *SQLStore, tx *sql.Tx, dst
 			leaseID, vaultID, dsName, projectID, env, secretPath, ea, ca,
 		)
 		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyDEKWrappings(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT id, master_key_id, provider, key_id, key_version,
+		wrapped_dek, status, verified_at, created_at, retired_at FROM dek_wrappings`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var id, provider, keyID, keyVersion, status string
+		var masterKeyID int
+		var wrappedDEK []byte
+		var verifiedAt, createdAt, retiredAt any
+		if err := rows.Scan(&id, &masterKeyID, &provider, &keyID, &keyVersion, &wrappedDEK,
+			&status, &verifiedAt, &createdAt, &retiredAt); err != nil {
+			return n, err
+		}
+		va, err := convertTime(verifiedAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		ca, err := convertTime(createdAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		ra, err := convertTime(retiredAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO dek_wrappings
+			(id, master_key_id, provider, key_id, key_version, wrapped_dek, status, verified_at, created_at, retired_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), id, masterKeyID, provider, keyID, keyVersion,
+			wrappedDEK, status, va, ca, ra); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func copyKeyRecoveryEvents(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
+	rows, err := src.db.QueryContext(ctx, `SELECT id, actor_id, actor_spiffe_id, recovery_wrapping_id,
+		recovery_provider, recovery_key_id, new_primary_wrapping_id, new_primary_provider,
+		new_primary_key_id, new_primary_key_version, created_at FROM key_recovery_events`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var event KeyRecoveryEvent
+		var createdAt any
+		if err := rows.Scan(&event.ID, &event.ActorID, &event.ActorSPIFFEID, &event.RecoveryWrappingID,
+			&event.RecoveryProvider, &event.RecoveryKeyID, &event.NewPrimaryWrappingID,
+			&event.NewPrimaryProvider, &event.NewPrimaryKeyID, &event.NewPrimaryKeyVersion, &createdAt); err != nil {
+			return n, err
+		}
+		ca, err := convertTime(createdAt, src.dialect, dstDialect)
+		if err != nil {
+			return n, err
+		}
+		if _, err := tx.ExecContext(ctx, dstDialect.Rebind(`INSERT INTO key_recovery_events
+			(id, actor_id, actor_spiffe_id, recovery_wrapping_id, recovery_provider, recovery_key_id,
+			 new_primary_wrapping_id, new_primary_provider, new_primary_key_id, new_primary_key_version, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), event.ID, event.ActorID, event.ActorSPIFFEID,
+			event.RecoveryWrappingID, event.RecoveryProvider, event.RecoveryKeyID, event.NewPrimaryWrappingID,
+			event.NewPrimaryProvider, event.NewPrimaryKeyID, event.NewPrimaryKeyVersion, ca); err != nil {
 			return n, err
 		}
 		n++

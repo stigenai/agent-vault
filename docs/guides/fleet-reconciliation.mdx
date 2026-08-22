@@ -1,0 +1,280 @@
+---
+title: "Fleet reconciliation with SPIFFE"
+description: "Manage vaults, workload identities, grants, services, and credential sources from reviewable TOML in Kubernetes."
+---
+
+Agent Vault can reconcile a fleet from versioned TOML without putting credential values in Git. An in-cluster operator authenticates with its rotating SPIFFE X.509-SVID, plans against redacted server state, and applies only the reviewed plan digest.
+
+The runnable examples live in [`examples/kubernetes/fleet`](https://github.com/stigenai/agent-vault/tree/main/examples/kubernetes/fleet). CI validates the runtime configuration, Kubernetes YAML, and every desired-state composition with the same Go loaders used in production.
+
+## Security boundary
+
+- TOML contains resource identities, policies, and secret references, never secret values.
+- `config plan` never fetches secret values. Plans contain credential key names and provider reference identities, but local `env://` and `file://` selectors are reduced to their resolver kind.
+- `config apply` rebuilds the plan from current server state and requires the exact SHA-256 digest that was reviewed. A stale or blocked plan returns a conflict before mutation.
+- The operator uses SPIFFE mTLS and sends no bearer token. It does not create `~/.agent-vault/session.json` or fall back to password authentication.
+- One-time imports are resolved only after approval. Values are bounded, sent in the authenticated request body, wiped from CLI and server buffers, encrypted immediately, and stored without a live source relationship.
+- Rotating SVID private keys authenticate transport; they are not durable data-encryption keys. Stored credentials remain encrypted by Agent Vault's random DEK and configured KMS, OpenBao Transit, or explicit age recovery wrapping.
+
+## Operator prerequisites
+
+Configure the operator's public client settings in the runtime TOML mounted into its pod:
+
+```toml
+schema_version = 1
+
+[client]
+address = "https://agent-vault.agent-vault.svc.cluster.local"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+```
+
+The exact operator SPIFFE ID must identify an active Agent Vault actor with instance role `owner`. In a new SPIFFE-only installation it can be bootstrapped once with `auth.bootstrap_owner_ids`. Subsequent owner changes use normal authorized APIs; changing the bootstrap list does not add owners.
+
+The example `CronJob` uses service account `agent-vault-reconciler`, mounts only the runtime and desired-state ConfigMaps plus the SPIRE Workload API socket, and sets `concurrencyPolicy: Forbid`. Register that service account with SPIRE using your existing registration mechanism.
+
+## Compose environments safely
+
+Every file repeats the schema version and manager. Files are sorted by path before merge, so the result does not depend on command-line ordering. Definitions may extend the same vault, but conflicting definitions, duplicate ownership, missing references, and different managers fail before any API mutation.
+
+The example separates non-secret common state from the environment-specific credential reference:
+
+```bash
+# Staging
+agent-vault config plan \
+  -f examples/kubernetes/fleet/desired-state/base.toml \
+  -f examples/kubernetes/fleet/desired-state/staging.toml
+
+# Production: choose this overlay instead of staging.toml
+agent-vault config plan \
+  -f examples/kubernetes/fleet/desired-state/base.toml \
+  -f examples/kubernetes/fleet/desired-state/production.toml
+```
+
+Do not pass both environment overlays: they intentionally define the same credential identity with different sources, and validation rejects the conflict.
+
+## Review and apply
+
+Write the redacted plan to an artifact, review its operations and prerequisites, then apply the exact digest:
+
+```bash
+agent-vault config plan \
+  -f desired-state/base.toml \
+  -f desired-state/production.toml > fleet-plan.json
+
+PLAN_SHA256="$(jq -r .plan_sha256 fleet-plan.json)"
+
+agent-vault config apply \
+  -f desired-state/base.toml \
+  -f desired-state/production.toml \
+  --plan-sha256 "$PLAN_SHA256"
+```
+
+`config apply` fetches current state again. If any managed revision, resource specification, ownership record, or prerequisite changed after review, the digest differs and the server returns `409` without applying the stale plan. Generate and review a new plan; do not mechanically substitute the new digest.
+
+A plan is ordinary deterministic JSON suitable for a pull-request artifact. This shortened example exposes identities and intent, but no credential value:
+
+```json
+{
+  "plan_sha256": "sha256:7f...",
+  "plan": {
+    "manager": "platform-fleet",
+    "blocked": false,
+    "operations": [
+      {
+        "resource": {"kind": "credential", "vault": "github-automation", "name": "GITHUB_TOKEN"},
+        "action": "create",
+        "reason": "resource_absent",
+        "expected_revision": 0,
+        "details": {
+          "credential": {
+            "mode": "reference",
+            "provider_kind": "aws-secrets-manager",
+            "source": "aws-production",
+            "reference": "agent-vault/production/github#token"
+          }
+        }
+      }
+    ],
+    "summary": {"create": 1, "update": 0, "delete": 0}
+  }
+}
+```
+
+For continuous drift reconciliation after the manifest itself is reviewed in Git, `--yes` prints the current redacted plan and approves that exact digest non-interactively:
+
+```bash
+agent-vault config apply --yes \
+  -f /etc/agent-vault/desired/base.toml \
+  -f /etc/agent-vault/desired/environment.toml
+```
+
+Pin the operator image by digest in production. The example uses `latest` only as a repository template.
+
+## Ownership, adoption, and prune
+
+The top-level `manager` is a stable GitOps controller identity, not a user or SPIFFE ID. Agent Vault records it with an optimistic revision for each managed resource.
+
+Default apply is additive:
+
+- Desired resources owned by the same manager are created, updated, or reported as no-op.
+- Existing unmanaged resources are retained and block a conflicting desired definition.
+- Resources owned by another manager produce a conflict. A manager cannot take them over.
+- Managed resources omitted from TOML are retained unless prune is explicitly enabled.
+
+To bring a matching unmanaged resource under control, inspect the plan and opt in:
+
+```bash
+agent-vault config plan --adopt -f fleet.toml
+agent-vault config apply --adopt -f fleet.toml --plan-sha256 sha256:REVIEWED_DIGEST
+```
+
+Adoption is never inferred from a matching name. If the unmanaged specification also differs, the plan reports `adopt-update` so the ownership and specification change are reviewed together.
+
+Prune affects only resources owned by the same manager:
+
+```bash
+agent-vault config plan --prune -f fleet.toml
+agent-vault config apply --prune -f fleet.toml --plan-sha256 sha256:REVIEWED_DIGEST
+```
+
+Credential identity deletion requires both controls:
+
+```bash
+agent-vault config plan --prune --prune-credentials -f fleet.toml
+agent-vault config apply --prune --prune-credentials \
+  -f fleet.toml --plan-sha256 sha256:REVIEWED_DIGEST
+```
+
+`--prune-credentials` deletes the credential identity and encrypted value. Parent vault or agent deletion is blocked while retained dependents still exist. Deletions are ordered service, grant, credential, agent, then vault.
+
+## Desired-state schema
+
+The root keys are:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `schema_version` | yes | Must be `1`. |
+| `manager` | yes | Stable portable ownership identifier, identical in every merged file. |
+| `agents` | no | Instance-level SPIFFE workload actors. |
+| `vaults` | no | Vault-scoped grants, services, credentials, and imports. |
+
+### Agents and grants
+
+```toml
+[[agents]]
+name = "pr-reviewer"
+spiffe_id = "spiffe://cluster.example/ns/agents/sa/pr-reviewer"
+role = "no-access"
+
+[[vaults]]
+name = "github-automation"
+
+[[vaults.grants]]
+agent = "pr-reviewer"
+role = "proxy"
+```
+
+`spiffe_id` must be one exact canonical SPIFFE ID; prefixes and wildcards are rejected. Instance role is `owner`, `member`, or `no-access`. A grant references a declared agent and uses vault role `admin`, `member`, or `proxy`.
+
+As shorthand, `[[vaults.agents]]` can declare an agent and grant together with `name`, `spiffe_id`, optional `instance_role`, and vault `role`. Loading normalizes it to the same instance agent plus vault grant model.
+
+### Services
+
+```toml
+[[vaults.services]]
+name = "github-api"
+host = "api.github.com"
+path = "/repos/*"
+enabled = true
+auth = { kind = "bearer", credential = "GITHUB_TOKEN" }
+```
+
+Services use the same host, path, port, authentication, and substitution semantics as the broker service API. Authentication kinds are:
+
+| `auth.kind` | Fields |
+|---|---|
+| `bearer` | `credential` |
+| `basic` | `username`, and optional credential-backed `password` |
+| `api-key` | `credential`, `header`, and optional non-secret `prefix` |
+| `custom` | `headers`, whose templates reference declared credential keys |
+| `passthrough` | No credential fields; allowlisted requests retain client authentication. |
+
+Substitutions use `credential`, `placeholder`, and optional `in` locations. Every referenced credential must be declared in the same vault as either a durable reference or import.
+
+### Durable provider references
+
+```toml
+[[vaults.credentials]]
+name = "GITHUB_TOKEN"
+mode = "reference"
+source = "aws-production"
+ref = "agent-vault/production/github#token"
+refresh_interval = "5m"
+max_staleness = "1h"
+```
+
+The named provider must exist in the Agent Vault server runtime configuration. The server periodically refreshes and encrypts a last-known-good value in PostgreSQL. Once `max_staleness` is exceeded, use fails closed.
+
+Supported reference forms include:
+
+| Provider | Reference form |
+|---|---|
+| AWS Secrets Manager | `secret-id[?version_id=ID\|version_stage=STAGE][#json-field]` |
+| OpenBao KV v2 | `mount/path[?version=N]#field` |
+| 1Password Connect | `vault/item/field` or `vault/item/section/field` |
+
+### One-time imports
+
+Imports create ordinary local encrypted credentials. They are appropriate for bootstrap or deliberately detached copies, not automatic rotation.
+
+```toml
+[[vaults.imports]]
+name = "BOOTSTRAP_TOKEN"
+from = "env://BOOTSTRAP_TOKEN"
+```
+
+Local `from` accepts `env://NAME`, `file:///absolute/path`, or one `stdin://` import across the merged apply set. Inline, relative file, shell, command, and executable sources are rejected.
+
+Provider-backed imports use `source` plus `ref` instead:
+
+```toml
+[[vaults.imports]]
+name = "BOOTSTRAP_TOKEN"
+source = "bao-production"
+ref = "secret/agent-vault/bootstrap#token"
+```
+
+Provider imports are fetched by the CLI pod using the `[[secret_providers]]` entries in its runtime TOML:
+
+- AWS uses the SDK default chain, including EKS Pod Identity or IRSA.
+- OpenBao uses the CLI workload's rotating SPIFFE X.509-SVID or audience-bound JWT-SVID.
+- 1Password Connect reads its token from an `env://` or absolute `file://` reference at fetch time.
+
+The server does not need the one-time provider configured. After success, current state records only `mode = "imported"`; it does not retain `from`, `source`, `ref`, provider version, or value.
+
+For `stdin://`, keep the value out of arguments and shell history:
+
+```bash
+kubectl -n secret-source get secret bootstrap-token \
+  -o jsonpath='{.data.token}' | base64 --decode | \
+  agent-vault config apply -f imports.toml --plan-sha256 "$PLAN_SHA256"
+```
+
+An import is one-time and becomes no-op after creation. Changing the upstream value alone does not trigger an update.
+
+## GitOps rollout and rollback
+
+Recommended pull-request flow:
+
+1. Validate the base plus exactly one environment overlay in CI.
+2. Run `config plan` from an owner-authorized preview Job and publish `fleet-plan.json` as a non-secret artifact.
+3. Review creates, updates, adoption, conflicts, and destructive prerequisites.
+4. Apply the reviewed digest from the same commit and immutable operator image.
+5. Keep a periodic `--yes` reconciler only if automatic drift correction is part of your policy.
+
+To roll back normal state, revert the Git commit, generate a fresh plan against current state, and apply its digest. Reusing the old digest is intentionally rejected because revisions changed.
+
+Removing a resource is additive by default, including during rollback. Use reviewed prune flags only when deletion is intended. To replace or roll back a one-time imported value, use a deliberate two-commit sequence: first remove that import and apply with `--prune --prune-credentials`; then restore the desired import declaration and apply again so the CLI resolves it once. This creates a deletion window, so prefer durable provider references when continuous availability and rotation matter.
+
+If an apply reports a partial successful prefix, do not edit ownership records manually. Fix the reported failed resource or provider condition, run `config plan` again, and apply the new digest. Reconciliation resumes from the accurately recorded revisions and converges already-applied operations as no-ops.

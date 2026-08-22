@@ -1,0 +1,94 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agent-vault-fleet
+  namespace: agent-vault
+  labels:
+    app.kubernetes.io/name: agent-vault
+    app.kubernetes.io/component: monitoring
+spec:
+  groups:
+    - name: agent-vault.identity
+      rules:
+        - alert: AgentVaultMetricsMissing
+          expr: absent(agent_vault_database_up)
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: Agent Vault operational metrics are missing
+            description: The authenticated SPIFFE scrape path has produced no broker metrics for five minutes.
+        - alert: AgentVaultSPIFFEIdentityUnavailable
+          expr: agent_vault_spiffe_svid_up == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: Agent Vault workload identity is unavailable
+            description: The broker cannot validate its current X.509-SVID.
+        - alert: AgentVaultSPIFFEIdentityExpiring
+          expr: agent_vault_spiffe_svid_seconds_until_expiry < 600
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: Agent Vault workload identity is close to expiry
+            description: Fewer than ten minutes remain on the current X.509-SVID.
+        - alert: AgentVaultRelaySPIFFEIdentityUnavailable
+          expr: agent_vault_relay_spiffe_svid_up == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: An Agent Vault relay workload identity is unavailable
+            description: A relay cannot validate its current X.509-SVID.
+    - name: agent-vault.storage
+      rules:
+        - alert: AgentVaultDatabaseUnavailable
+          expr: agent_vault_database_up == 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: Agent Vault database is unavailable
+            description: The bounded broker database health check is failing.
+        - alert: AgentVaultDEKUnavailable
+          expr: agent_vault_dek_unwrap_up == 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: Agent Vault encryption key is unavailable
+            description: The broker has not completed DEK unwrap.
+    - name: agent-vault.providers
+      rules:
+        - alert: AgentVaultProviderApproachingStaleness
+          expr: agent_vault_secret_source_seconds_until_stale < 300
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: Agent Vault provider cache is approaching fail-close
+            description: At least one last-known-good credential source has fewer than five minutes remaining.
+        - alert: AgentVaultProviderStale
+          expr: agent_vault_secret_sources{health="stale"} > 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: Agent Vault provider cache is stale
+            description: At least one credential source has exceeded its last-known-good window.
+        - alert: AgentVaultProviderRefreshFailures
+          expr: increase(agent_vault_secret_refresh_source_failures_total[10m]) > 0
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: Agent Vault provider refreshes are failing
+            description: Provider refresh attempts have failed during the last ten minutes.
+    - name: agent-vault.reconciliation
+      rules:
+        - alert: AgentVaultFleetReconcileConflicts
+          expr: increase(agent_vault_fleet_reconcile_conflicts_total[15m]) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: Agent Vault fleet reconciliation has conflicts
+            description: Desired state was rejected due to a plan or revision conflict.
+        - alert: AgentVaultRelayConnectivityFailure
+          expr: increase(agent_vault_relay_dial_failures_total[5m]) > 0
+          for: 1m
+          labels: {severity: warning}
+          annotations:
+            summary: An Agent Vault relay cannot reach the central broker
+            description: A relay has failed an mTLS connection to the central broker.

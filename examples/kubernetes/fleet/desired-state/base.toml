@@ -1,0 +1,20 @@
+schema_version = 1
+manager = "platform-fleet"
+
+[[agents]]
+name = "pr-reviewer"
+spiffe_id = "spiffe://cluster.example/ns/agents/sa/pr-reviewer"
+role = "no-access"
+
+[[vaults]]
+name = "github-automation"
+
+[[vaults.grants]]
+agent = "pr-reviewer"
+role = "proxy"
+
+[[vaults.services]]
+name = "github-api"
+host = "api.github.com"
+enabled = true
+auth = { kind = "bearer", credential = "GITHUB_TOKEN" }
