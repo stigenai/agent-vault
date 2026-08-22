@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/huh"
 	"github.com/Infisical/agent-vault/internal/auth"
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/session"
 	"github.com/Infisical/agent-vault/internal/store"
 	"github.com/Infisical/agent-vault/internal/telemetry"
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -61,9 +61,10 @@ const (
 // control-plane traffic goes direct even when the child process inherits
 // MITM proxy env vars. All other destinations fall through to the
 // system proxy, so corporate proxies still work for direct CLI usage.
-var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
-	Transport: &clientHeaderTransport{
+var httpClient = &http.Client{Timeout: 10 * time.Second, Transport: defaultCLITransport()}
+
+func defaultCLITransport() http.RoundTripper {
+	return &clientHeaderTransport{
 		base: &http.Transport{
 			Proxy: func(r *http.Request) (*url.URL, error) {
 				if avAddr := os.Getenv("AGENT_VAULT_ADDR"); avAddr != "" {
@@ -74,7 +75,7 @@ var httpClient = &http.Client{
 				return http.ProxyFromEnvironment(r)
 			},
 		},
-	},
+	}
 }
 
 // selectAddress prompts the user to pick a hosting option interactively.
@@ -327,6 +328,9 @@ func withReauthRetry(sess *session.ClientSession, addr string, op func(*session.
 	if err == nil || !errors.Is(err, errSessionExpired) {
 		return err
 	}
+	if sess.WorkloadIdentity {
+		return err
+	}
 	if !isInteractiveFn() || addr != sess.Address {
 		return err
 	}
@@ -366,6 +370,9 @@ func interactiveReadPasswordWithConfirm() (string, error) {
 
 // ensureSession loads the client session, or interactively guides the user through setup if no session exists and a TTY is available.
 func ensureSession() (*session.ClientSession, error) {
+	if sess, err := loadWorkloadIdentitySession(); err != nil || sess != nil {
+		return sess, err
+	}
 	sess, err := session.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading session: %w", err)
@@ -538,6 +545,11 @@ const (
 // rather than silently falling through to interactive login — masking that
 // misconfig produces "why don't my creds work" tickets.
 func resolveSession() (*session.ClientSession, string, error) {
+	if sess, err := loadWorkloadIdentitySession(); err != nil {
+		return nil, "", err
+	} else if sess != nil {
+		return sess, "SPIFFE workload identity", nil
+	}
 	token := os.Getenv(envVarToken)
 	addr := os.Getenv("AGENT_VAULT_ADDR")
 	if token != "" && addr == "" {
@@ -570,7 +582,9 @@ func validateEnvToken(addr, token, vault, tokenSource string) error {
 	if err != nil {
 		return fmt.Errorf("validate token: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	if vault != "" {
 		req.Header.Set("X-Vault", vault)
 	}
@@ -619,6 +633,20 @@ func resolveAddress(cmd *cobra.Command) string {
 	return DefaultAddress
 }
 
+func resolveAddressWithWorkloadIdentity(cmd *cobra.Command) (string, error) {
+	identityAddress, enabled, err := workloadIdentityAddress()
+	if err != nil {
+		return "", err
+	}
+	if addr, _ := cmd.Flags().GetString("address"); addr != "" {
+		return addr, nil
+	}
+	if enabled {
+		return identityAddress, nil
+	}
+	return resolveAddress(cmd), nil
+}
+
 // fetchAndDecode performs an authenticated request and decodes the JSON response into T.
 func fetchAndDecode[T any](method, path string) (*T, error) {
 	sess, err := ensureSession()
@@ -661,7 +689,9 @@ func doVaultScopedRequestWithBody(method, url, token, vault string, body []byte)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if vault != "" {
 		req.Header.Set("X-Vault", vault)
@@ -747,4 +777,3 @@ func validInstanceRole(s string) bool {
 	}
 	return false
 }
-

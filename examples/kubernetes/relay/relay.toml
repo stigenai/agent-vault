@@ -1,0 +1,12 @@
+schema_version = 1
+
+[client]
+address = "https://agent-vault.agent-vault.svc.cluster.local"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+
+[relay]
+listener_mode = "network"
+listen_address = "0.0.0.0:14322"
+remote_address = "agent-vault.agent-vault.svc.cluster.local:14322"
+metrics_address = "0.0.0.0:9464"

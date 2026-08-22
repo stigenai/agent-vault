@@ -70,6 +70,29 @@ func TestSetupPasswordlessAndUnlockRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUnlockWithDEKVerifiesAndCopiesProviderKey(t *testing.T) {
+	original, record, err := SetupPasswordless()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Wipe()
+	providerDEK := append([]byte(nil), original.Key()...)
+	unlocked, err := UnlockWithDEK(providerDEK, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlocked.Wipe()
+	crypto.WipeBytes(providerDEK)
+	if string(unlocked.Key()) != string(original.Key()) {
+		t.Fatal("provider DEK was not copied into the master key")
+	}
+	wrong := append([]byte(nil), original.Key()...)
+	wrong[0] ^= 0xff
+	if _, err := UnlockWithDEK(wrong, record); err != ErrWrongPassword {
+		t.Fatalf("wrong provider DEK error = %v, want ErrWrongPassword", err)
+	}
+}
+
 func TestUnlockWrongPassword(t *testing.T) {
 	password := []byte("correct-password")
 	wrong := []byte("wrong-password")

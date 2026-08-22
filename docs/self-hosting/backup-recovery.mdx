@@ -1,0 +1,118 @@
+---
+title: "Backup and restore"
+description: "Back up PostgreSQL, restore an isolated Agent Vault fleet, and record RPO/RTO evidence"
+---
+
+## What the backup must protect
+
+Back up the entire Agent Vault PostgreSQL database as one consistent snapshot. It contains vaults, encrypted credentials and provider caches, source metadata, grants, request audit rows, shared CA state, the encrypted DEK sentinel, provider wrappings, and recovery audit events.
+
+The database backup is necessary but not sufficient. Retain these separately:
+
+- the versioned runtime and desired-state TOML;
+- the PostgreSQL CA and connection metadata, with the password in your secret manager;
+- the AWS KMS key or OpenBao Transit key and policy for at least the database-retention period;
+- the public age recovery recipient in TOML and its private identity offline;
+- immutable Agent Vault image digests and release notes for the restored schema version.
+
+Never put a database password, provider token, plaintext DEK, age private identity, or CA private key in the backup report. The CA private key and cached credentials are already encrypted inside PostgreSQL.
+
+## Define RPO and RTO first
+
+- **RPO** is bounded by the interval between recoverable database snapshots or the point-in-time-recovery window. A nightly dump has a worst-case RPO near 24 hours even if the dump itself takes seconds.
+- **RTO** starts when recovery is declared and ends only after the restored broker has unwrapped the DEK, loaded the existing CA, passed readiness, and successfully brokered a representative request.
+
+Record the target, observed result, backup identifier, database snapshot time, Agent Vault image digest, PostgreSQL version, primary wrapper identity, operator, and test date. Do not call a restore successful after `pg_restore` alone.
+
+## Create a logical backup
+
+Use `pg_dump` from the same PostgreSQL major version as the server and a least-privilege backup identity. Keep credentials out of arguments and shell history with a mode-`0600` passfile or your platform's managed backup integration.
+
+```bash
+umask 077
+export PGPASSFILE=/run/secrets/postgres/pgpass
+
+pg_dump \
+  --host postgres.example \
+  --port 5432 \
+  --username agentvault_backup \
+  --dbname agentvault \
+  --format custom \
+  --no-owner \
+  --no-privileges \
+  --file /secure-backups/agent-vault-$(date -u +%Y%m%dT%H%M%SZ).dump
+```
+
+Encrypt the artifact with your backup system, calculate and retain its checksum, replicate it outside the cluster, and test its retention lock. For tighter RPO, use managed PostgreSQL physical backups and WAL/PITR in addition to periodic logical dumps; still run the logical drill because it verifies application-level usability.
+
+## Restore into isolation
+
+1. Create a clean PostgreSQL database and dedicated Agent Vault role in an isolated recovery environment.
+2. Stop or scale down brokers and reconcilers there so no process migrates or mutates a partial restore.
+3. Restore with the same-major `pg_restore` client.
+4. Point a copy of the exact runtime TOML and image digest at the restored database.
+5. Give that isolated workload access to the original primary KMS/Transit key. Do not mount the age identity yet.
+
+```bash
+export PGPASSFILE=/run/secrets/postgres/pgpass-restore
+
+pg_restore \
+  --host postgres-recovery.example \
+  --port 5432 \
+  --username agentvault \
+  --dbname agentvault \
+  --no-owner \
+  --no-privileges \
+  --exit-on-error \
+  /secure-backups/agent-vault-20260818T000000Z.dump
+```
+
+Start one broker. Successful startup proves the configured primary provider can unwrap the restored DEK and the sentinel matches. Compare the public CA fingerprint with the source environment, then verify:
+
+- expected vault and credential-source counts;
+- SPIFFE actors and vault grants;
+- service configuration and a representative brokered request;
+- request/audit history and key-recovery history;
+- all expected active DEK wrappings;
+- CA continuity by minting and using a leaf through the normal proxy path;
+- provider-cache freshness and max-staleness behavior.
+
+Use control-plane and proxy APIs for functional verification. Do not reveal a credential merely to prove it exists.
+
+## Exercise offline recovery separately
+
+After the ordinary restore succeeds, simulate loss of the original provider in the isolated environment. Stop all broker replicas, configure a replacement AWS KMS or OpenBao Transit primary, mount the offline age identity only in a short-lived SPIFFE owner pod, and follow [Encryption key recovery](/self-hosting/key-recovery).
+
+Recovery must require all of these explicit inputs: an active owner SVID, named age wrapper, named non-recovery replacement wrapper, private identity through a mode-`0600` file or standard input, and `--confirm-recovery`. It must write a secret-free audit event and leave the replacement provider wrapping decryptable. Remove the age identity and delete the pod before returning service.
+
+## Automated local drill
+
+The repository drill starts two isolated PostgreSQL containers, seeds representative encrypted fleet state, performs `pg_dump` and `pg_restore`, unwraps through the primary-provider contract, verifies vaults/sources/grants/audit/CA/wrappings, and then runs explicit offline recovery:
+
+```bash
+make test-backup-recovery
+```
+
+It emits a secret-free JSON observation such as:
+
+```json
+{
+  "backup_duration_ms": 129,
+  "observed_rpo_snapshot_lag_ms": 9,
+  "observed_rto_restore_recovery_ms": 504,
+  "vaults": 2,
+  "credential_sources": 1,
+  "grants": 2,
+  "request_audit_rows": 1,
+  "dek_wrappings": 3,
+  "recovery_audit_rows": 1,
+  "primary_provider": "test-kms",
+  "ca_usable": true
+}
+```
+
+The local provider is deterministic test infrastructure; a production rehearsal must repeat the same path using the real AWS KMS or OpenBao Transit policy. Retain the CI log or copy the JSON into the recovery record with the backup identifier and actual RPO schedule. Compare observed RTO with the target and remediate before the next drill.
+
+## Return to service
+
+Roll out the same restored configuration to all replicas, wait for startup and readiness, then re-enable reconciliation and traffic. Do not delete the former provider wrapping during an incident. Wrapper retirement is a separate operation after the restored fleet, backups, and offline recovery have all been verified.

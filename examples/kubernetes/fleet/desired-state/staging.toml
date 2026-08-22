@@ -1,0 +1,13 @@
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "github-automation"
+
+[[vaults.credentials]]
+name = "GITHUB_TOKEN"
+mode = "reference"
+source = "aws-staging"
+ref = "agent-vault/staging/github#token"
+refresh_interval = "5m"
+max_staleness = "1h"

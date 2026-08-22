@@ -20,10 +20,10 @@ const (
 // differ only in Host (loopback vs host.docker.internal) and CAPath
 // (host-local vs container-local bind mount).
 type ProxyEnvParams struct {
-	Host    string // MITM listener host from the child's point of view
-	Port    int
-	Token   string
-	Vault   string
+	Host   string // MITM listener host from the child's point of view
+	Port   int
+	Token  string
+	Vault  string
 	CAPath string // path the child reads the CA PEM from
 }
 
@@ -41,11 +41,14 @@ type ProxyEnvParams struct {
 // sdks/sdk-typescript/src/resources/sessions.ts.
 func BuildProxyEnv(p ProxyEnvParams) []string {
 	scheme := "http"
-	proxyURL := (&url.URL{
+	u := &url.URL{
 		Scheme: scheme,
-		User:   url.UserPassword(p.Token, p.Vault),
 		Host:   net.JoinHostPort(p.Host, strconv.Itoa(p.Port)),
-	}).String()
+	}
+	if p.Token != "" || p.Vault != "" {
+		u.User = url.UserPassword(p.Token, p.Vault)
+	}
+	proxyURL := u.String()
 	return []string{
 		"HTTPS_PROXY=" + proxyURL,
 		"HTTP_PROXY=" + proxyURL,

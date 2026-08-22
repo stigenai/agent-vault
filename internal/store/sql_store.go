@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -42,8 +43,6 @@ func utcTimePtr(t *time.Time) *time.Time {
 	u := t.UTC()
 	return &u
 }
-
-
 
 // nullableString returns nil for empty strings, enabling SQL NULL inserts.
 func nullableString(s string) interface{} {
@@ -128,6 +127,16 @@ func (s *SQLStore) SetSetting(ctx context.Context, key, value string) error {
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = ?`),
 		key, value, nowVal, nowVal)
 	return err
+}
+
+func (s *SQLStore) GetOrCreateSetting(ctx context.Context, key, candidate string) (string, error) {
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx, s.dialect.Rebind(
+		`INSERT INTO instance_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING`),
+		key, candidate, now); err != nil {
+		return "", fmt.Errorf("creating instance setting: %w", err)
+	}
+	return s.GetSetting(ctx, key)
 }
 
 func (s *SQLStore) GetAllSettings(ctx context.Context) (map[string]string, error) {
@@ -286,6 +295,9 @@ func (s *SQLStore) CreateExternalVault(ctx context.Context, p CreateExternalVaul
 			return nil, fmt.Errorf("inserting credential %q: %w", item.Key, err)
 		}
 	}
+	if err := s.attachLegacyInfisicalSourcesTx(ctx, tx, vaultID); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`INSERT INTO vault_grants (actor_id, actor_type, vault_id, role, created_at)
@@ -341,7 +353,12 @@ func (s *SQLStore) ListVaultCredentialStores(ctx context.Context) ([]VaultCreden
 // gone (vault deleted mid-sync); callers should treat that as benign.
 func (s *SQLStore) UpdateVaultCredentialStoreHealth(ctx context.Context, vaultID, status, errMsg string, syncedAt time.Time) error {
 	syncedStr := s.dialect.FormatTime(syncedAt.UTC())
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning credential store health update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`UPDATE vault_credential_stores
 		    SET last_synced_at = ?, last_sync_status = ?, last_sync_error = ?, updated_at = ?
 		  WHERE vault_id = ?`),
@@ -353,6 +370,23 @@ func (s *SQLStore) UpdateVaultCredentialStoreHealth(ctx context.Context, vaultID
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+	health := CredentialSourceHealthError
+	errorCode := "legacy-sync-error"
+	if status == SyncStatusOK {
+		health = CredentialSourceHealthOK
+		errorCode = ""
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`UPDATE credential_sources
+		SET health = ?, last_error_code = ?, last_refresh_at = ?,
+			last_success_at = CASE WHEN ? = 'ok' THEN ? ELSE last_success_at END,
+			updated_at = ?
+		WHERE vault_id = ? AND kind = 'infisical' AND provider_name = ?`),
+		health, errorCode, syncedStr, health, syncedStr, s.now(), vaultID, "legacy-infisical-"+vaultID); err != nil {
+		return fmt.Errorf("updating legacy credential source health: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing credential store health: %w", err)
 	}
 	return nil
 }
@@ -382,6 +416,33 @@ func (s *SQLStore) replaceCredentialsTx(ctx context.Context, tx *sql.Tx, vaultID
 		); err != nil {
 			return fmt.Errorf("inserting credential %q: %w", item.Key, err)
 		}
+	}
+	return s.attachLegacyInfisicalSourcesTx(ctx, tx, vaultID)
+}
+
+func (s *SQLStore) attachLegacyInfisicalSourcesTx(ctx context.Context, tx *sql.Tx, vaultID string) error {
+	_, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO credential_sources (
+		vault_id, credential_key, mode, kind, provider_name, reference,
+		refresh_interval_seconds, max_staleness_seconds, provider_version,
+		health, last_error_code, cache_updated_at, last_refresh_at,
+		last_success_at, next_refresh_at, created_at, updated_at)
+	SELECT c.vault_id, c.key, 'reference', 'infisical',
+		'legacy-infisical-' || c.vault_id, c.key, vcs.poll_interval_seconds, 0, '',
+		CASE vcs.last_sync_status WHEN 'ok' THEN 'ok' WHEN 'error' THEN 'error' ELSE 'pending' END,
+		CASE vcs.last_sync_status WHEN 'error' THEN 'legacy-sync-error' ELSE '' END,
+		c.updated_at, vcs.last_synced_at,
+		CASE WHEN vcs.last_sync_status = 'ok' THEN COALESCE(vcs.last_synced_at, c.updated_at) ELSE c.updated_at END,
+		NULL, c.created_at, c.updated_at
+	FROM credentials c JOIN vault_credential_stores vcs ON vcs.vault_id = c.vault_id
+	WHERE c.vault_id = ? AND c.type = 'static'
+	ON CONFLICT(vault_id, credential_key) DO UPDATE SET
+		provider_name = excluded.provider_name, reference = excluded.reference,
+		refresh_interval_seconds = excluded.refresh_interval_seconds,
+		health = excluded.health, last_error_code = excluded.last_error_code,
+		cache_updated_at = excluded.cache_updated_at, last_refresh_at = excluded.last_refresh_at,
+		last_success_at = excluded.last_success_at, updated_at = excluded.updated_at`), vaultID)
+	if err != nil {
+		return fmt.Errorf("attaching legacy Infisical credential sources: %w", err)
 	}
 	return nil
 }
@@ -475,9 +536,22 @@ func (s *SQLStore) SetVaultExternalStore(ctx context.Context, p SetVaultExternal
 // the last synced snapshot becomes ordinary built-in credentials. Returns nil
 // when no row exists (the vault was already built-in).
 func (s *SQLStore) DeleteVaultCredentialStore(ctx context.Context, vaultID string) error {
-	if _, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning credential store deletion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM credential_sources WHERE vault_id = ? AND kind = 'infisical' AND provider_name = ?`),
+		vaultID, "legacy-infisical-"+vaultID); err != nil {
+		return fmt.Errorf("detaching legacy Infisical credential sources: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`DELETE FROM vault_credential_stores WHERE vault_id = ?`), vaultID); err != nil {
 		return fmt.Errorf("deleting credential store: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing credential store deletion: %w", err)
 	}
 	return nil
 }
@@ -694,7 +768,12 @@ func (s *SQLStore) SetCredential(ctx context.Context, vaultID, key string, ciphe
 	now := time.Now().UTC()
 	nowStr := s.dialect.FormatTime(now)
 
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning local credential update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx,
 		s.dialect.Rebind(`INSERT INTO credentials (id, vault_id, key, type, ciphertext, nonce, created_at, updated_at)
 		 VALUES (?, ?, ?, 'static', ?, ?, ?, ?)
 		 ON CONFLICT(vault_id, key) DO UPDATE SET
@@ -705,6 +784,15 @@ func (s *SQLStore) SetCredential(ctx context.Context, vaultID, key string, ciphe
 	)
 	if err != nil {
 		return nil, fmt.Errorf("setting credential: %w", err)
+	}
+	// Direct sets and one-time imports intentionally sever any live provider
+	// relationship while retaining the newly encrypted local value.
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM credential_sources WHERE vault_id = ? AND credential_key = ?`), vaultID, key); err != nil {
+		return nil, fmt.Errorf("clearing credential source: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing local credential update: %w", err)
 	}
 
 	return &Credential{
@@ -754,6 +842,320 @@ func (s *SQLStore) DeleteCredential(ctx context.Context, vaultID, key string) er
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// SetCredentialSource attaches or updates non-secret live-reference metadata
+// for an existing encrypted credential cache row.
+func (s *SQLStore) SetCredentialSource(ctx context.Context, source CredentialSource) (*CredentialSource, error) {
+	if err := validateCredentialSource(source); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if source.CreatedAt.IsZero() {
+		source.CreatedAt = now
+	}
+	source.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO credential_sources
+		(vault_id, credential_key, mode, kind, provider_name, reference,
+		 refresh_interval_seconds, max_staleness_seconds, provider_version, health,
+		 last_error_code, cache_updated_at, last_refresh_at, last_success_at,
+		 next_refresh_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(vault_id, credential_key) DO UPDATE SET
+		 mode = excluded.mode, kind = excluded.kind, provider_name = excluded.provider_name,
+		 reference = excluded.reference, refresh_interval_seconds = excluded.refresh_interval_seconds,
+		 max_staleness_seconds = excluded.max_staleness_seconds,
+		 provider_version = excluded.provider_version, health = excluded.health,
+		 last_error_code = excluded.last_error_code, cache_updated_at = excluded.cache_updated_at,
+		 last_refresh_at = excluded.last_refresh_at, last_success_at = excluded.last_success_at,
+		 next_refresh_at = excluded.next_refresh_at, updated_at = excluded.updated_at`),
+		source.VaultID, source.CredentialKey, source.Mode, source.Kind, source.ProviderName,
+		source.Reference, source.RefreshIntervalSeconds, source.MaxStalenessSeconds,
+		source.ProviderVersion, source.Health, source.LastErrorCode,
+		s.dialect.FormatNullableTime(source.CacheUpdatedAt), s.dialect.FormatNullableTime(source.LastRefreshAt),
+		s.dialect.FormatNullableTime(source.LastSuccessAt), s.dialect.FormatNullableTime(source.NextRefreshAt),
+		s.dialect.FormatTime(source.CreatedAt), s.dialect.FormatTime(source.UpdatedAt))
+	if err != nil {
+		return nil, fmt.Errorf("setting credential source: %w", err)
+	}
+	return s.GetCredentialSource(ctx, source.VaultID, source.CredentialKey)
+}
+
+func (s *SQLStore) GetCredentialSource(ctx context.Context, vaultID, credentialKey string) (*CredentialSource, error) {
+	row := s.db.QueryRowContext(ctx, s.dialect.Rebind(credentialSourceSelect+` WHERE vault_id = ? AND credential_key = ?`), vaultID, credentialKey)
+	return s.scanCredentialSource(row)
+}
+
+func (s *SQLStore) ListCredentialSources(ctx context.Context, vaultID string) ([]CredentialSource, error) {
+	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(credentialSourceSelect+` WHERE vault_id = ? ORDER BY credential_key`), vaultID)
+	if err != nil {
+		return nil, fmt.Errorf("listing credential sources: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var sources []CredentialSource
+	for rows.Next() {
+		source, err := s.scanCredentialSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, *source)
+	}
+	return sources, rows.Err()
+}
+
+// ListAllCredentialSources supports one bounded observability query across a
+// fleet. The caller aggregates metadata only and never exports identifying
+// fields from the returned rows.
+func (s *SQLStore) ListAllCredentialSources(ctx context.Context) ([]CredentialSource, error) {
+	rows, err := s.db.QueryContext(ctx, credentialSourceSelect+` ORDER BY vault_id, credential_key`)
+	if err != nil {
+		return nil, fmt.Errorf("listing all credential sources: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var sources []CredentialSource
+	for rows.Next() {
+		source, err := s.scanCredentialSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, *source)
+	}
+	return sources, rows.Err()
+}
+
+func (s *SQLStore) DeleteCredentialSource(ctx context.Context, vaultID, credentialKey string) error {
+	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM credential_sources WHERE vault_id = ? AND credential_key = ?`), vaultID, credentialKey)
+	if err != nil {
+		return fmt.Errorf("deleting credential source: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLStore) ClaimCredentialSources(ctx context.Context, workerID string, now time.Time, lease time.Duration, limit int) ([]CredentialSource, error) {
+	if workerID == "" || strings.ContainsAny(workerID, "\r\n\x00") || lease < 5*time.Second || lease > 10*time.Minute {
+		return nil, fmt.Errorf("credential refresh worker or lease is invalid")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning credential refresh claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now = now.UTC()
+	rows, err := tx.QueryContext(ctx, s.dialect.Rebind(`SELECT vault_id, credential_key
+		FROM credential_sources
+		WHERE (next_refresh_at IS NULL OR next_refresh_at <= ?)
+		  AND (claim_until IS NULL OR claim_until <= ?)
+		ORDER BY CASE WHEN next_refresh_at IS NULL THEN 0 ELSE 1 END, next_refresh_at, vault_id, credential_key
+		LIMIT ?`), s.dialect.FormatTime(now), s.dialect.FormatTime(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("selecting credential refresh claims: %w", err)
+	}
+	type key struct{ vaultID, credentialKey string }
+	var keys []key
+	for rows.Next() {
+		var candidate key
+		if err := rows.Scan(&candidate.vaultID, &candidate.credentialKey); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		keys = append(keys, candidate)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	claimUntil := now.Add(lease)
+	var claimed []CredentialSource
+	for _, candidate := range keys {
+		result, err := tx.ExecContext(ctx, s.dialect.Rebind(`UPDATE credential_sources
+			SET claim_owner = ?, claim_until = ?, updated_at = ?
+			WHERE vault_id = ? AND credential_key = ?
+			  AND (next_refresh_at IS NULL OR next_refresh_at <= ?)
+			  AND (claim_until IS NULL OR claim_until <= ?)`),
+			workerID, s.dialect.FormatTime(claimUntil), s.dialect.FormatTime(now),
+			candidate.vaultID, candidate.credentialKey, s.dialect.FormatTime(now), s.dialect.FormatTime(now))
+		if err != nil {
+			return nil, fmt.Errorf("claiming credential refresh: %w", err)
+		}
+		count, _ := result.RowsAffected()
+		if count == 0 {
+			continue
+		}
+		source, err := s.scanCredentialSource(tx.QueryRowContext(ctx,
+			s.dialect.Rebind(credentialSourceSelect+` WHERE vault_id = ? AND credential_key = ?`),
+			candidate.vaultID, candidate.credentialKey))
+		if err != nil {
+			return nil, err
+		}
+		claimed = append(claimed, *source)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing credential refresh claims: %w", err)
+	}
+	return claimed, nil
+}
+
+func (s *SQLStore) CompleteCredentialRefresh(ctx context.Context, completion CredentialRefreshCompletion) (bool, error) {
+	if completion.VaultID == "" || completion.CredentialKey == "" || completion.ClaimOwner == "" ||
+		completion.RefreshedAt.IsZero() || completion.NextRefreshAt.IsZero() ||
+		strings.ContainsAny(completion.ProviderVersion, "\r\n\x00") {
+		return false, fmt.Errorf("credential refresh completion is invalid")
+	}
+	if completion.ValueChanged && (len(completion.Ciphertext) == 0 || len(completion.Nonce) == 0) {
+		return false, fmt.Errorf("changed credential refresh requires encrypted cache")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("beginning credential refresh completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var owner sql.NullString
+	var cacheUpdatedAt any
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT claim_owner, cache_updated_at FROM credential_sources WHERE vault_id = ? AND credential_key = ?`)+s.dialect.ForUpdateClause(),
+		completion.VaultID, completion.CredentialKey).Scan(&owner, &cacheUpdatedAt); err != nil {
+		return false, err
+	}
+	if owner.String != completion.ClaimOwner {
+		return false, nil
+	}
+	if !completion.ValueChanged && cacheUpdatedAt == nil {
+		return false, fmt.Errorf("unchanged refresh requires an existing encrypted cache")
+	}
+	refreshedAt := s.dialect.FormatTime(completion.RefreshedAt.UTC())
+	if completion.ValueChanged {
+		result, err := tx.ExecContext(ctx, s.dialect.Rebind(`UPDATE credentials
+			SET ciphertext = ?, nonce = ?, updated_at = ? WHERE vault_id = ? AND key = ?`),
+			completion.Ciphertext, completion.Nonce, refreshedAt, completion.VaultID, completion.CredentialKey)
+		if err != nil {
+			return false, fmt.Errorf("updating encrypted credential cache: %w", err)
+		}
+		if count, _ := result.RowsAffected(); count == 0 {
+			return false, sql.ErrNoRows
+		}
+	}
+	cacheExpr := "cache_updated_at"
+	if completion.ValueChanged {
+		cacheExpr = "?"
+	}
+	query := `UPDATE credential_sources SET provider_version = ?, health = 'ok', last_error_code = '',
+		cache_updated_at = ` + cacheExpr + `, last_refresh_at = ?, last_success_at = ?,
+		next_refresh_at = ?, refresh_failures = 0, claim_owner = NULL, claim_until = NULL, updated_at = ?
+		WHERE vault_id = ? AND credential_key = ? AND claim_owner = ?`
+	args := []any{completion.ProviderVersion}
+	if completion.ValueChanged {
+		args = append(args, refreshedAt)
+	}
+	args = append(args, refreshedAt, refreshedAt, s.dialect.FormatTime(completion.NextRefreshAt.UTC()),
+		refreshedAt, completion.VaultID, completion.CredentialKey, completion.ClaimOwner)
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(query), args...); err != nil {
+		return false, fmt.Errorf("completing credential refresh metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("committing credential refresh completion: %w", err)
+	}
+	return true, nil
+}
+
+func (s *SQLStore) FailCredentialRefresh(ctx context.Context, failure CredentialRefreshFailure) (bool, error) {
+	if failure.VaultID == "" || failure.CredentialKey == "" || failure.ClaimOwner == "" ||
+		failure.AttemptedAt.IsZero() || failure.NextRefreshAt.IsZero() ||
+		failure.ErrorCode == "" || len(failure.ErrorCode) > 128 || strings.ContainsAny(failure.ErrorCode, "\r\n\x00") {
+		return false, fmt.Errorf("credential refresh failure is invalid")
+	}
+	if failure.Health != CredentialSourceHealthError && failure.Health != CredentialSourceHealthStale {
+		return false, fmt.Errorf("credential refresh failure health is invalid")
+	}
+	result, err := s.db.ExecContext(ctx, s.dialect.Rebind(`UPDATE credential_sources
+		SET health = ?, last_error_code = ?, last_refresh_at = ?, next_refresh_at = ?,
+			refresh_failures = refresh_failures + 1, claim_owner = NULL, claim_until = NULL, updated_at = ?
+		WHERE vault_id = ? AND credential_key = ? AND claim_owner = ?`),
+		failure.Health, failure.ErrorCode, s.dialect.FormatTime(failure.AttemptedAt.UTC()),
+		s.dialect.FormatTime(failure.NextRefreshAt.UTC()), s.dialect.FormatTime(failure.AttemptedAt.UTC()),
+		failure.VaultID, failure.CredentialKey, failure.ClaimOwner)
+	if err != nil {
+		return false, fmt.Errorf("failing credential refresh: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	return count == 1, nil
+}
+
+const credentialSourceSelect = `SELECT vault_id, credential_key, mode, kind, provider_name, reference,
+	refresh_interval_seconds, max_staleness_seconds, provider_version, health, last_error_code,
+	cache_updated_at, last_refresh_at, last_success_at, next_refresh_at,
+	refresh_failures, claim_owner, claim_until, created_at, updated_at
+	FROM credential_sources`
+
+func (s *SQLStore) scanCredentialSource(row rowScanner) (*CredentialSource, error) {
+	var source CredentialSource
+	var cacheUpdatedAt, lastRefreshAt, lastSuccessAt, nextRefreshAt, claimUntil, createdAt, updatedAt any
+	var claimOwner sql.NullString
+	if err := row.Scan(&source.VaultID, &source.CredentialKey, &source.Mode, &source.Kind,
+		&source.ProviderName, &source.Reference, &source.RefreshIntervalSeconds,
+		&source.MaxStalenessSeconds, &source.ProviderVersion, &source.Health, &source.LastErrorCode,
+		&cacheUpdatedAt, &lastRefreshAt, &lastSuccessAt, &nextRefreshAt,
+		&source.RefreshFailures, &claimOwner, &claimUntil, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	var err error
+	if source.CacheUpdatedAt, err = s.dialect.ScanNullableTime(cacheUpdatedAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source cache time: %w", err)
+	}
+	if source.LastRefreshAt, err = s.dialect.ScanNullableTime(lastRefreshAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source refresh time: %w", err)
+	}
+	if source.LastSuccessAt, err = s.dialect.ScanNullableTime(lastSuccessAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source success time: %w", err)
+	}
+	if source.NextRefreshAt, err = s.dialect.ScanNullableTime(nextRefreshAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source next refresh time: %w", err)
+	}
+	source.ClaimOwner = claimOwner.String
+	if source.ClaimUntil, err = s.dialect.ScanNullableTime(claimUntil); err != nil {
+		return nil, fmt.Errorf("scanning credential source claim time: %w", err)
+	}
+	if source.CreatedAt, err = s.dialect.ScanTime(createdAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source created time: %w", err)
+	}
+	if source.UpdatedAt, err = s.dialect.ScanTime(updatedAt); err != nil {
+		return nil, fmt.Errorf("scanning credential source updated time: %w", err)
+	}
+	return &source, nil
+}
+
+func validateCredentialSource(source CredentialSource) error {
+	if source.VaultID == "" || source.CredentialKey == "" || source.ProviderName == "" || source.Reference == "" {
+		return fmt.Errorf("credential source vault, key, provider name, and reference are required")
+	}
+	if source.Mode != CredentialSourceModeReference {
+		return fmt.Errorf("credential source mode must be %q", CredentialSourceModeReference)
+	}
+	switch source.Kind {
+	case CredentialSourceAWSSecretsManager, CredentialSourceOpenBaoKV2, CredentialSourceOnePassword, CredentialSourceInfisical:
+	default:
+		return fmt.Errorf("unsupported credential source kind %q", source.Kind)
+	}
+	if source.RefreshIntervalSeconds < 10 || source.MaxStalenessSeconds < 0 {
+		return fmt.Errorf("credential source refresh interval must be at least 10 seconds and max staleness non-negative")
+	}
+	if source.MaxStalenessSeconds == 0 &&
+		(source.Kind != CredentialSourceInfisical || !strings.HasPrefix(source.ProviderName, "legacy-infisical-")) {
+		return fmt.Errorf("credential source max staleness must be positive")
+	}
+	switch source.Health {
+	case CredentialSourceHealthPending, CredentialSourceHealthOK, CredentialSourceHealthError, CredentialSourceHealthStale:
+	default:
+		return fmt.Errorf("unsupported credential source health %q", source.Health)
+	}
+	for _, value := range []string{source.ProviderName, source.Reference, source.ProviderVersion, source.LastErrorCode} {
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("credential source metadata contains control characters")
+		}
 	}
 	return nil
 }
@@ -1769,6 +2171,215 @@ func (s *SQLStore) UpdateMasterKeyRecord(ctx context.Context, record *MasterKeyR
 	return nil
 }
 
+func (s *SQLStore) InsertDEKWrapping(ctx context.Context, record *DEKWrappingRecord) error {
+	if record == nil || record.Provider == "" || record.KeyID == "" || len(record.WrappedDEK) == 0 {
+		return fmt.Errorf("invalid DEK wrapping record")
+	}
+	if record.Status != DEKWrappingPrimary && record.Status != DEKWrappingActive && record.Status != DEKWrappingRetired {
+		return fmt.Errorf("invalid DEK wrapping status")
+	}
+	if record.ID == "" {
+		record.ID = newUUID()
+	}
+	if record.VerifiedAt.IsZero() {
+		return fmt.Errorf("DEK wrapping must be verified before persistence")
+	}
+	_, err := s.db.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO dek_wrappings
+(id, master_key_id, provider, key_id, key_version, wrapped_dek, status, verified_at, retired_at)
+VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`),
+		record.ID, record.Provider, record.KeyID, record.KeyVersion, append([]byte(nil), record.WrappedDEK...),
+		record.Status, s.dialect.FormatTime(record.VerifiedAt), s.dialect.FormatNullableTime(record.RetiredAt),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting DEK wrapping: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLStore) ListDEKWrappings(ctx context.Context, includeRetired bool) ([]DEKWrappingRecord, error) {
+	query := `SELECT id, provider, key_id, key_version, wrapped_dek, status, verified_at, created_at, retired_at
+FROM dek_wrappings`
+	if !includeRetired {
+		query += ` WHERE status <> 'retired'`
+	}
+	query += ` ORDER BY CASE status WHEN 'primary' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, created_at, id`
+	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(query))
+	if err != nil {
+		return nil, fmt.Errorf("listing DEK wrappings: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var result []DEKWrappingRecord
+	for rows.Next() {
+		var record DEKWrappingRecord
+		var verifiedAt, createdAt, retiredAt interface{}
+		if err := rows.Scan(&record.ID, &record.Provider, &record.KeyID, &record.KeyVersion, &record.WrappedDEK,
+			&record.Status, &verifiedAt, &createdAt, &retiredAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping: %w", err)
+		}
+		if record.VerifiedAt, err = s.dialect.ScanTime(verifiedAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping verified time: %w", err)
+		}
+		if record.CreatedAt, err = s.dialect.ScanTime(createdAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping created time: %w", err)
+		}
+		if record.RetiredAt, err = s.dialect.ScanNullableTime(retiredAt); err != nil {
+			return nil, fmt.Errorf("scanning DEK wrapping retired time: %w", err)
+		}
+		result = append(result, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing DEK wrappings: %w", err)
+	}
+	return result, nil
+}
+
+func (s *SQLStore) GetPrimaryDEKWrapping(ctx context.Context) (*DEKWrappingRecord, error) {
+	rows, err := s.ListDEKWrappings(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 || rows[0].Status != DEKWrappingPrimary {
+		return nil, sql.ErrNoRows
+	}
+	return &rows[0], nil
+}
+
+// PromoteDEKWrapping atomically serializes competing replicas on the
+// singleton master-key row, demotes the prior primary, promotes target, and
+// optionally clears the legacy plaintext DEK only after target is known to be
+// a verified non-retired wrapping.
+func (s *SQLStore) PromoteDEKWrapping(ctx context.Context, targetID string, clearPlaintext bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning DEK wrapping promotion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.promoteDEKWrappingTx(ctx, tx, targetID, clearPlaintext); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing DEK wrapping promotion: %w", err)
+	}
+	return nil
+}
+
+// PromoteDEKWrappingWithRecoveryAudit makes the new verified primary and its
+// secret-free recovery audit event indivisible. A crash cannot leave an
+// unaudited successful recovery.
+func (s *SQLStore) PromoteDEKWrappingWithRecoveryAudit(ctx context.Context, targetID string, event KeyRecoveryEvent) error {
+	if event.ActorID == "" || event.ActorSPIFFEID == "" || event.RecoveryWrappingID == "" {
+		return fmt.Errorf("recovery audit actor and wrapping are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning recovery promotion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var actorSPIFFEID, actorRole, actorStatus string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT spiffe_id, role, status FROM agents WHERE id = ?`)+s.dialect.ForUpdateClause(),
+		event.ActorID).Scan(&actorSPIFFEID, &actorRole, &actorStatus); err != nil {
+		return fmt.Errorf("authorizing recovery actor: %w", err)
+	}
+	if actorSPIFFEID != event.ActorSPIFFEID || actorRole != "owner" || actorStatus != "active" {
+		return fmt.Errorf("recovery actor is not an active SPIFFE instance owner")
+	}
+	if err := s.promoteDEKWrappingTx(ctx, tx, targetID, true); err != nil {
+		return err
+	}
+	var recoveryProvider, recoveryKeyID string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT provider, key_id FROM dek_wrappings WHERE id = ? AND master_key_id = 1`),
+		event.RecoveryWrappingID).Scan(&recoveryProvider, &recoveryKeyID); err != nil {
+		return fmt.Errorf("selecting recovery wrapping for audit: %w", err)
+	}
+	var targetProvider, targetKeyID, targetKeyVersion string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT provider, key_id, key_version FROM dek_wrappings WHERE id = ? AND master_key_id = 1`),
+		targetID).Scan(&targetProvider, &targetKeyID, &targetKeyVersion); err != nil {
+		return fmt.Errorf("selecting new primary for recovery audit: %w", err)
+	}
+	if event.ID == "" {
+		event.ID = newUUID()
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO key_recovery_events
+		(id, actor_id, actor_spiffe_id, recovery_wrapping_id, recovery_provider, recovery_key_id,
+		 new_primary_wrapping_id, new_primary_provider, new_primary_key_id, new_primary_key_version, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		event.ID, event.ActorID, event.ActorSPIFFEID, event.RecoveryWrappingID, recoveryProvider, recoveryKeyID,
+		targetID, targetProvider, targetKeyID, targetKeyVersion, s.dialect.FormatTime(event.CreatedAt)); err != nil {
+		return fmt.Errorf("recording key recovery audit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing recovery promotion: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLStore) promoteDEKWrappingTx(ctx context.Context, tx *sql.Tx, targetID string, clearPlaintext bool) error {
+	var masterID int
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM master_key WHERE id = 1`+s.dialect.ForUpdateClause()).Scan(&masterID); err != nil {
+		return fmt.Errorf("locking master key for wrapping promotion: %w", err)
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT status FROM dek_wrappings WHERE id = ? AND master_key_id = 1`), targetID).Scan(&status); err != nil {
+		return fmt.Errorf("selecting verified DEK wrapping: %w", err)
+	}
+	if status == DEKWrappingRetired {
+		return fmt.Errorf("retired DEK wrapping cannot become primary")
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`UPDATE dek_wrappings SET status = ? WHERE master_key_id = 1 AND status = ? AND id <> ?`),
+		DEKWrappingActive, DEKWrappingPrimary, targetID); err != nil {
+		return fmt.Errorf("demoting prior DEK wrapping: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.dialect.Rebind(
+		`UPDATE dek_wrappings SET status = ? WHERE id = ?`), DEKWrappingPrimary, targetID); err != nil {
+		return fmt.Errorf("promoting DEK wrapping: %w", err)
+	}
+	if clearPlaintext {
+		if _, err := tx.ExecContext(ctx, `UPDATE master_key SET dek_plaintext = NULL WHERE id = 1`); err != nil {
+			return fmt.Errorf("clearing legacy plaintext DEK: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *SQLStore) ListKeyRecoveryEvents(ctx context.Context, limit int) ([]KeyRecoveryEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(`SELECT id, actor_id, actor_spiffe_id,
+		recovery_wrapping_id, recovery_provider, recovery_key_id, new_primary_wrapping_id,
+		new_primary_provider, new_primary_key_id, new_primary_key_version, created_at
+		FROM key_recovery_events ORDER BY created_at DESC, id DESC LIMIT ?`), limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing key recovery events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var events []KeyRecoveryEvent
+	for rows.Next() {
+		var event KeyRecoveryEvent
+		var createdAt any
+		if err := rows.Scan(&event.ID, &event.ActorID, &event.ActorSPIFFEID,
+			&event.RecoveryWrappingID, &event.RecoveryProvider, &event.RecoveryKeyID,
+			&event.NewPrimaryWrappingID, &event.NewPrimaryProvider, &event.NewPrimaryKeyID,
+			&event.NewPrimaryKeyVersion, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning key recovery event: %w", err)
+		}
+		event.CreatedAt, err = s.dialect.ScanTime(createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("scanning key recovery event time: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 // --- Broker Configs ---
 
 func (s *SQLStore) SetBrokerConfig(ctx context.Context, vaultID string, servicesJSON string) (*BrokerConfig, error) {
@@ -2703,7 +3314,7 @@ func (s *SQLStore) CreateAgent(ctx context.Context, name, createdBy, role string
 	}, nil
 }
 
-func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []AgentVaultGrantSpec, expiresAt *time.Time) (*Agent, *Session, error) {
+func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []AgentVaultGrantSpec, expiresAt *time.Time) (*Agent, *Session, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("beginning transaction: %w", err)
@@ -2715,9 +3326,9 @@ func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, crea
 	nowStr := s.dialect.FormatTime(now)
 
 	_, err = tx.ExecContext(ctx,
-		s.dialect.Rebind(`INSERT INTO agents (id, name, role, status, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, 'active', ?, ?, ?)`),
-		agentID, name, role, createdBy, nowStr, nowStr,
+		s.dialect.Rebind(`INSERT INTO agents (id, name, spiffe_id, role, status, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`),
+		agentID, name, nullableString(spiffeID), role, createdBy, nowStr, nowStr,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating agent: %w", err)
@@ -2753,6 +3364,7 @@ func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, crea
 	ag := &Agent{
 		ID:        agentID,
 		Name:      name,
+		SPIFFEID:  spiffeID,
 		Role:      role,
 		Status:    "active",
 		CreatedBy: createdBy,
@@ -2765,8 +3377,24 @@ func (s *SQLStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, crea
 
 func (s *SQLStore) GetAgentByID(ctx context.Context, id string) (*Agent, error) {
 	row := s.db.QueryRowContext(ctx,
-		s.dialect.Rebind(`SELECT id, name, role, status, created_by, created_at, updated_at, revoked_at
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
 		 FROM agents WHERE id = ?`), id,
+	)
+	ag, err := s.scanAgent(row)
+	if err != nil {
+		return nil, err
+	}
+	ag.Vaults, err = s.ListActorGrants(ctx, ag.ID)
+	if err != nil {
+		return nil, err
+	}
+	return ag, nil
+}
+
+func (s *SQLStore) GetAgentBySPIFFEID(ctx context.Context, spiffeID string) (*Agent, error) {
+	row := s.db.QueryRowContext(ctx,
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
+		 FROM agents WHERE spiffe_id = ?`), spiffeID,
 	)
 	ag, err := s.scanAgent(row)
 	if err != nil {
@@ -2792,7 +3420,7 @@ func (s *SQLStore) GetAgentNameByID(ctx context.Context, id string) (string, err
 
 func (s *SQLStore) GetAgentByName(ctx context.Context, name string) (*Agent, error) {
 	row := s.db.QueryRowContext(ctx,
-		s.dialect.Rebind(`SELECT id, name, role, status, created_by, created_at, updated_at, revoked_at
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
 		 FROM agents WHERE name = ?`), name,
 	)
 	ag, err := s.scanAgent(row)
@@ -2812,7 +3440,7 @@ func (s *SQLStore) ListAgents(ctx context.Context, vaultID string) ([]Agent, err
 		return nil, fmt.Errorf("vaultID is required; use ListAllAgents for cross-vault listing")
 	}
 	rows, err := s.db.QueryContext(ctx,
-		s.dialect.Rebind(`SELECT a.id, a.name, a.role, a.status, a.created_by, a.created_at, a.updated_at, a.revoked_at
+		s.dialect.Rebind(`SELECT a.id, a.name, a.spiffe_id, a.role, a.status, a.created_by, a.created_at, a.updated_at, a.revoked_at
 		 FROM agents a
 		 JOIN vault_grants vg ON vg.actor_id = a.id AND vg.actor_type = 'agent'
 		 WHERE vg.vault_id = ? ORDER BY a.name`), vaultID,
@@ -2845,7 +3473,7 @@ func (s *SQLStore) ListAgents(ctx context.Context, vaultID string) ([]Agent, err
 // ListAllAgents returns all agents with their vault grants.
 func (s *SQLStore) ListAllAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx,
-		s.dialect.Rebind(`SELECT id, name, role, status, created_by, created_at, updated_at, revoked_at
+		s.dialect.Rebind(`SELECT id, name, spiffe_id, role, status, created_by, created_at, updated_at, revoked_at
 		 FROM agents ORDER BY name`),
 	)
 	if err != nil {
@@ -3069,10 +3697,11 @@ func (s *SQLStore) CreateAgentToken(ctx context.Context, agentID string, expires
 // Expected column order: id, name, status, created_by, created_at, updated_at, revoked_at
 func (s *SQLStore) scanAgent(row *sql.Row) (*Agent, error) {
 	var ag Agent
+	var spiffeID sql.NullString
 	var createdAt, updatedAt interface{}
 	var revokedAt interface{}
 
-	if err := row.Scan(&ag.ID, &ag.Name, &ag.Role,
+	if err := row.Scan(&ag.ID, &ag.Name, &spiffeID, &ag.Role,
 		&ag.Status, &ag.CreatedBy, &createdAt, &updatedAt, &revokedAt); err != nil {
 		return nil, err
 	}
@@ -3080,15 +3709,17 @@ func (s *SQLStore) scanAgent(row *sql.Row) (*Agent, error) {
 	ag.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	ag.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 	ag.RevokedAt, _ = s.dialect.ScanNullableTime(revokedAt)
+	ag.SPIFFEID = spiffeID.String
 	return &ag, nil
 }
 
 func (s *SQLStore) scanAgentRow(rows *sql.Rows) (*Agent, error) {
 	var ag Agent
+	var spiffeID sql.NullString
 	var createdAt, updatedAt interface{}
 	var revokedAt interface{}
 
-	if err := rows.Scan(&ag.ID, &ag.Name, &ag.Role,
+	if err := rows.Scan(&ag.ID, &ag.Name, &spiffeID, &ag.Role,
 		&ag.Status, &ag.CreatedBy, &createdAt, &updatedAt, &revokedAt); err != nil {
 		return nil, err
 	}
@@ -3096,6 +3727,7 @@ func (s *SQLStore) scanAgentRow(rows *sql.Rows) (*Agent, error) {
 	ag.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	ag.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 	ag.RevokedAt, _ = s.dialect.ScanNullableTime(revokedAt)
+	ag.SPIFFEID = spiffeID.String
 	return &ag, nil
 }
 
@@ -3156,6 +3788,21 @@ func (s *SQLStore) UpdateAgentRole(ctx context.Context, agentID, role string) er
 	return nil
 }
 
+func (s *SQLStore) UpdateAgentSPIFFEID(ctx context.Context, agentID, spiffeID string) error {
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind("UPDATE agents SET spiffe_id = ?, updated_at = ? WHERE id = ?"),
+		nullableString(spiffeID), s.now(), agentID,
+	)
+	if err != nil {
+		return fmt.Errorf("updating agent SPIFFE ID: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *SQLStore) CountAllOwners(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx,
@@ -3164,6 +3811,90 @@ func (s *SQLStore) CountAllOwners(ctx context.Context) (int, error) {
 		s.dialect.BoolVal(true),
 	).Scan(&count)
 	return count, err
+}
+
+const spiffeOwnerBootstrapSetting = "auth.spiffe_owner_bootstrap.v1"
+
+// BootstrapSPIFFEOwners atomically claims the one-time bootstrap marker and,
+// only when no active owner already exists, creates the complete configured
+// owner set without durable bearer tokens. A later configuration change can
+// observe the original set but can never add owners through bootstrap.
+func (s *SQLStore) BootstrapSPIFFEOwners(ctx context.Context, spiffeIDs []string) (SPIFFEOwnerBootstrap, error) {
+	ids := append([]string(nil), spiffeIDs...)
+	sort.Strings(ids)
+	for i := 1; i < len(ids); i++ {
+		if ids[i] == ids[i-1] {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("duplicate SPIFFE owner ID %q", ids[i])
+		}
+	}
+	payload, err := json.Marshal(ids)
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("encode SPIFFE owner bootstrap: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("begin SPIFFE owner bootstrap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := s.now()
+	res, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO instance_settings (key, value, updated_at)
+		VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING`), spiffeOwnerBootstrapSetting, string(payload), now)
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("claim SPIFFE owner bootstrap: %w", err)
+	}
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("inspect SPIFFE owner bootstrap claim: %w", err)
+	}
+
+	configured := ids
+	if claimed == 0 {
+		var stored string
+		if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT value FROM instance_settings WHERE key = ?`), spiffeOwnerBootstrapSetting).Scan(&stored); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("read SPIFFE owner bootstrap claim: %w", err)
+		}
+		if err := json.Unmarshal([]byte(stored), &configured); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("decode SPIFFE owner bootstrap claim: %w", err)
+		}
+	}
+
+	var owners, spiffeOwners int
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT
+		(SELECT COUNT(*) FROM users WHERE role = 'owner' AND is_active = ?) +
+		(SELECT COUNT(*) FROM agents WHERE role = 'owner' AND status = 'active'),
+		(SELECT COUNT(*) FROM agents WHERE role = 'owner' AND status = 'active' AND spiffe_id IS NOT NULL)`), s.dialect.BoolVal(true)).Scan(&owners, &spiffeOwners); err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("count owners during SPIFFE bootstrap: %w", err)
+	}
+	if claimed == 0 || owners > 0 {
+		if err := tx.Commit(); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("finish SPIFFE owner bootstrap check: %w", err)
+		}
+		return SPIFFEOwnerBootstrap{ConfiguredIDs: configured, OwnerCount: owners, SPIFFEOwners: spiffeOwners}, nil
+	}
+
+	var defaultVaultID string
+	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT id FROM vaults WHERE name = ?`), "default").Scan(&defaultVaultID); err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("find default vault for SPIFFE owners: %w", err)
+	}
+	for _, spiffeID := range ids {
+		digest := sha256.Sum256([]byte(spiffeID))
+		name := "spiffe-owner-" + hex.EncodeToString(digest[:8])
+		agentID := newUUID()
+		if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO agents
+			(id, name, spiffe_id, role, status, created_by, created_at, updated_at)
+			VALUES (?, ?, ?, 'owner', 'active', 'spiffe-bootstrap', ?, ?)`), agentID, name, spiffeID, now, now); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("create SPIFFE owner %q: %w", spiffeID, err)
+		}
+		if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO vault_grants
+			(actor_id, actor_type, vault_id, role, created_at) VALUES (?, 'agent', ?, 'admin', ?)`), agentID, defaultVaultID, now); err != nil {
+			return SPIFFEOwnerBootstrap{}, fmt.Errorf("grant default vault to SPIFFE owner %q: %w", spiffeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SPIFFEOwnerBootstrap{}, fmt.Errorf("commit SPIFFE owner bootstrap: %w", err)
+	}
+	return SPIFFEOwnerBootstrap{Applied: true, ConfiguredIDs: ids, OwnerCount: len(ids), SPIFFEOwners: len(ids)}, nil
 }
 
 // newUUID generates a v4 UUID using crypto/rand.

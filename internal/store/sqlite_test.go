@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1022,6 +1023,66 @@ func TestMasterKeyRecordSingleton(t *testing.T) {
 	}
 }
 
+func TestMultipleDEKWrappingsCoexistWithLegacyRecord(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	legacy := &MasterKeyRecord{
+		Sentinel:      []byte("legacy-sentinel"),
+		SentinelNonce: []byte("legacy-nonce"),
+		DEKCiphertext: []byte("legacy-password-wrapped-dek"),
+		DEKNonce:      []byte("legacy-dek-nonce"),
+	}
+	if err := s.SetMasterKeyRecord(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, record := range []*DEKWrappingRecord{
+		{Provider: "aws-kms", KeyID: "arn:aws:kms:us-east-1:123:key/one", KeyVersion: "1", WrappedDEK: []byte("kms-ciphertext"), Status: DEKWrappingPrimary, VerifiedAt: now},
+		{Provider: "openbao-transit", KeyID: "transit/keys/agent-vault", KeyVersion: "2", WrappedDEK: []byte("vault:v2:ciphertext"), Status: DEKWrappingActive, VerifiedAt: now},
+	} {
+		if err := s.InsertDEKWrapping(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrappings, err := s.ListDEKWrappings(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrappings) != 2 || wrappings[0].Status != DEKWrappingPrimary || wrappings[1].Provider != "openbao-transit" {
+		t.Fatalf("wrappings = %#v", wrappings)
+	}
+	primary, err := s.GetPrimaryDEKWrapping(ctx)
+	if err != nil || primary.Provider != "aws-kms" {
+		t.Fatalf("primary = %#v, %v", primary, err)
+	}
+	gotLegacy, err := s.GetMasterKeyRecord(ctx)
+	if err != nil || string(gotLegacy.DEKCiphertext) != string(legacy.DEKCiphertext) {
+		t.Fatalf("legacy compatibility record changed: %#v, %v", gotLegacy, err)
+	}
+	if err := s.InsertDEKWrapping(ctx, &DEKWrappingRecord{
+		Provider: "age-x25519", KeyID: "age1recovery", WrappedDEK: []byte("recovery-ciphertext"), Status: DEKWrappingPrimary, VerifiedAt: now,
+	}); err == nil {
+		t.Fatal("second primary wrapping was accepted")
+	}
+}
+
+func TestDEKWrappingRequiresVerifiedCiphertext(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	if err := s.SetMasterKeyRecord(ctx, &MasterKeyRecord{Sentinel: []byte("s"), SentinelNonce: []byte("n"), DEKPlaintext: []byte("legacy")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range []*DEKWrappingRecord{
+		{Provider: "aws-kms", KeyID: "key", Status: DEKWrappingActive, VerifiedAt: time.Now()},
+		{Provider: "aws-kms", KeyID: "key", WrappedDEK: []byte("ciphertext"), Status: DEKWrappingActive},
+		{Provider: "aws-kms", KeyID: "key", WrappedDEK: []byte("ciphertext"), Status: "unknown", VerifiedAt: time.Now()},
+	} {
+		if err := s.InsertDEKWrapping(ctx, record); err == nil {
+			t.Fatalf("invalid wrapping persisted: %#v", record)
+		}
+	}
+}
+
 // --- Broker Config ---
 
 func TestBrokerConfigCRUD(t *testing.T) {
@@ -1449,7 +1510,6 @@ func TestCascadeDeleteVaultRemovesProposals(t *testing.T) {
 	}
 }
 
-
 // --- UUID ---
 
 func TestNewUUIDUniqueness(t *testing.T) {
@@ -1677,7 +1737,6 @@ func TestDeleteUserSessions(t *testing.T) {
 	}
 }
 
-
 func TestDeleteUserCascadesGrants(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -1713,6 +1772,122 @@ func TestCreateAgent(t *testing.T) {
 	}
 }
 
+func TestBootstrapSPIFFEOwnersIsAtomicAndOneTime(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	sets := [][]string{
+		{"spiffe://cluster.example/owner/a", "spiffe://cluster.example/owner/b"},
+		{"spiffe://cluster.example/owner/x", "spiffe://cluster.example/owner/y"},
+	}
+	type result struct {
+		value SPIFFEOwnerBootstrap
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(sets))
+	for _, ids := range sets {
+		ids := ids
+		go func() {
+			<-start
+			value, err := s.BootstrapSPIFFEOwners(ctx, ids)
+			results <- result{value: value, err: err}
+		}()
+	}
+	close(start)
+	var got []result
+	for range sets {
+		got = append(got, <-results)
+	}
+	applied := 0
+	var winner []string
+	for _, item := range got {
+		if item.err != nil {
+			t.Fatal(item.err)
+		}
+		if item.value.Applied {
+			applied++
+			winner = item.value.ConfiguredIDs
+		}
+	}
+	if applied != 1 {
+		t.Fatalf("applied bootstrap calls = %d, want 1; results=%+v", applied, got)
+	}
+	for _, item := range got {
+		if strings.Join(item.value.ConfiguredIDs, "\n") != strings.Join(winner, "\n") {
+			t.Fatalf("replicas observed inconsistent owner sets: winner=%v result=%v", winner, item.value.ConfiguredIDs)
+		}
+	}
+
+	agents, err := s.ListAllAgents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != len(winner) {
+		t.Fatalf("agents = %d, want %d", len(agents), len(winner))
+	}
+	seen := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		seen[agent.SPIFFEID] = true
+		if agent.Role != "owner" || agent.Status != "active" {
+			t.Fatalf("bootstrapped agent = %+v", agent)
+		}
+		if tokens, err := s.CountAgentTokens(ctx, agent.ID); err != nil || tokens != 0 {
+			t.Fatalf("durable tokens for %s = %d, %v", agent.SPIFFEID, tokens, err)
+		}
+	}
+	for _, id := range winner {
+		if !seen[id] {
+			t.Fatalf("winning owner %q missing", id)
+		}
+	}
+
+	later, err := s.BootstrapSPIFFEOwners(ctx, []string{"spiffe://cluster.example/owner/later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.Applied {
+		t.Fatalf("later configuration replayed bootstrap: %+v", later)
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, "spiffe://cluster.example/owner/later"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("later owner was created: %v", err)
+	}
+}
+
+func TestBootstrapSPIFFEOwnersDoesNotAugmentExistingOwnerSet(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	vault, err := s.GetVault(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.RegisterFirstUser(ctx, "owner@example.com", []byte("hash"), []byte("salt"), vault.ID, 3, 65536, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const configured = "spiffe://cluster.example/owner/new"
+	result, err := s.BootstrapSPIFFEOwners(ctx, []string{configured})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || result.OwnerCount != 1 || result.SPIFFEOwners != 0 {
+		t.Fatalf("bootstrap with existing owner = %+v", result)
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, configured); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("bootstrap augmented existing owner set: %v", err)
+	}
+
+	if err := s.DeleteUser(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.BootstrapSPIFFEOwners(ctx, []string{configured})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || result.OwnerCount != 0 {
+		t.Fatalf("consumed bootstrap replayed after owner deletion: %+v", result)
+	}
+}
+
 func TestCreateAgentWithGrantsAndToken(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -1722,7 +1897,7 @@ func TestCreateAgentWithGrantsAndToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "txbot", "creator-uid", "member",
+	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "txbot", "", "creator-uid", "member",
 		[]AgentVaultGrantSpec{{VaultID: ns.ID, Role: "proxy"}}, nil)
 	if err != nil {
 		t.Fatalf("CreateAgentWithGrantsAndToken: %v", err)
@@ -1747,7 +1922,7 @@ func TestCreateAgentWithGrantsAndToken_NoVaults(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "barebot", "creator-uid", "member", nil, nil)
+	ag, sess, err := s.CreateAgentWithGrantsAndToken(ctx, "barebot", "", "creator-uid", "member", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateAgentWithGrantsAndToken: %v", err)
 	}
@@ -1756,6 +1931,45 @@ func TestCreateAgentWithGrantsAndToken_NoVaults(t *testing.T) {
 	}
 	if n, _ := s.CountAgentTokens(ctx, ag.ID); n != 1 {
 		t.Fatalf("expected 1 token, got %d", n)
+	}
+}
+
+func TestAgentSPIFFEIDIsUniqueExactAndUpdatable(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	spiffeID := "spiffe://cluster.example/ns/agents/sa/tool-agent"
+
+	ag, _, err := s.CreateAgentWithGrantsAndToken(ctx, "spiffe-agent", spiffeID, "creator-uid", "member", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ag.SPIFFEID != spiffeID {
+		t.Fatalf("created SPIFFE ID = %q", ag.SPIFFEID)
+	}
+	got, err := s.GetAgentBySPIFFEID(ctx, spiffeID)
+	if err != nil || got.ID != ag.ID || got.SPIFFEID != spiffeID {
+		t.Fatalf("exact lookup = %#v, %v", got, err)
+	}
+	if _, _, err := s.CreateAgentWithGrantsAndToken(ctx, "duplicate-spiffe", spiffeID, "creator-uid", "member", nil, nil); err == nil {
+		t.Fatal("duplicate SPIFFE ID was accepted")
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, strings.ToUpper(spiffeID)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("case-changed lookup error = %v, want sql.ErrNoRows", err)
+	}
+
+	updated := "spiffe://cluster.example/ns/agents/sa/renamed"
+	if err := s.UpdateAgentSPIFFEID(ctx, ag.ID, updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetAgentBySPIFFEID(ctx, updated)
+	if err != nil || got.ID != ag.ID {
+		t.Fatalf("updated lookup = %#v, %v", got, err)
+	}
+	if err := s.UpdateAgentSPIFFEID(ctx, ag.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetAgentBySPIFFEID(ctx, updated); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cleared lookup error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -1954,7 +2168,6 @@ func TestGetSessionBackwardCompat(t *testing.T) {
 		t.Fatalf("expected empty agent_id for old session, got %q", fetched.AgentID)
 	}
 }
-
 
 func TestDeleteAgentTokens(t *testing.T) {
 	s := openTestDB(t)

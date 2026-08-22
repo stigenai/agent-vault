@@ -22,6 +22,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/infisical"
 	"github.com/Infisical/agent-vault/internal/notify"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -30,42 +31,124 @@ var tp = timePtr
 
 // mockStore implements Store for testing.
 type mockStore struct {
-	masterKeyRecord    *store.MasterKeyRecord
-	sessions           map[string]*store.Session
-	vaults             map[string]*store.Vault
-	credentials        map[string]*store.Credential   // keyed by "vaultID:key"
-	brokerConfigs      map[string]*store.BrokerConfig // keyed by vaultID
-	proposals          map[string][]store.Proposal    // keyed by vaultID
-	users              map[string]*store.User         // keyed by email
-	grants             map[string]map[string]string   // keyed by userID -> vaultID -> role
-	userInvites        map[string]*store.UserInvite   // keyed by token
-	emailVerifications []*store.EmailVerification
-	passwordResets     []*store.PasswordReset
-	agents             map[string]*store.Agent                // keyed by name
-	agentVaultGrants   []store.VaultGrant                     // agent vault grants
-	settings           map[string]string                      // instance settings
-	vaultSettings      map[string]map[string]string           // per-vault: vaultID -> key -> value
-	credStores         map[string]*store.VaultCredentialStore // per-vault external credential store config
-	unmatchedHosts     map[string][]store.UnmatchedHost       // keyed by vaultID
-	sessionCounter     int
+	credentialSources      map[string]*store.CredentialSource
+	setCredentialSourceErr error
+	managedResources       map[store.ManagedResourceKey]store.ManagedResource
+	masterKeyRecord        *store.MasterKeyRecord
+	sessions               map[string]*store.Session
+	vaults                 map[string]*store.Vault
+	credentials            map[string]*store.Credential   // keyed by "vaultID:key"
+	brokerConfigs          map[string]*store.BrokerConfig // keyed by vaultID
+	proposals              map[string][]store.Proposal    // keyed by vaultID
+	users                  map[string]*store.User         // keyed by email
+	grants                 map[string]map[string]string   // keyed by userID -> vaultID -> role
+	userInvites            map[string]*store.UserInvite   // keyed by token
+	emailVerifications     []*store.EmailVerification
+	passwordResets         []*store.PasswordReset
+	agents                 map[string]*store.Agent                // keyed by name
+	agentVaultGrants       []store.VaultGrant                     // agent vault grants
+	settings               map[string]string                      // instance settings
+	vaultSettings          map[string]map[string]string           // per-vault: vaultID -> key -> value
+	credStores             map[string]*store.VaultCredentialStore // per-vault external credential store config
+	unmatchedHosts         map[string][]store.UnmatchedHost       // keyed by vaultID
+	sessionCounter         int
+	dialectName            string
+	pingErr                error
 }
 
 func newMockStore() *mockStore {
 	ms := &mockStore{
-		sessions:      make(map[string]*store.Session),
-		vaults:        make(map[string]*store.Vault),
-		credentials:   make(map[string]*store.Credential),
-		brokerConfigs: make(map[string]*store.BrokerConfig),
-		users:         make(map[string]*store.User),
-		userInvites:   make(map[string]*store.UserInvite),
-		agents:        make(map[string]*store.Agent),
-		settings:      make(map[string]string),
-		vaultSettings: make(map[string]map[string]string),
-		credStores:    make(map[string]*store.VaultCredentialStore),
+		credentialSources: make(map[string]*store.CredentialSource),
+		managedResources:  make(map[store.ManagedResourceKey]store.ManagedResource),
+		sessions:          make(map[string]*store.Session),
+		vaults:            make(map[string]*store.Vault),
+		credentials:       make(map[string]*store.Credential),
+		brokerConfigs:     make(map[string]*store.BrokerConfig),
+		users:             make(map[string]*store.User),
+		userInvites:       make(map[string]*store.UserInvite),
+		agents:            make(map[string]*store.Agent),
+		settings:          make(map[string]string),
+		vaultSettings:     make(map[string]map[string]string),
+		credStores:        make(map[string]*store.VaultCredentialStore),
 	}
 	// Seed root vault
 	ms.vaults["default"] = &store.Vault{ID: "root-ns-id", Name: "default"}
 	return ms
+}
+
+func (m *mockStore) GetManagedResource(_ context.Context, key store.ManagedResourceKey) (*store.ManagedResource, error) {
+	resource, ok := m.managedResources[key]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return &resource, nil
+}
+
+func (m *mockStore) ListManagedResources(context.Context) ([]store.ManagedResource, error) {
+	resources := make([]store.ManagedResource, 0, len(m.managedResources))
+	for _, resource := range m.managedResources {
+		resources = append(resources, resource)
+	}
+	return resources, nil
+}
+
+func (m *mockStore) CompareAndSwapManagedResource(_ context.Context, key store.ManagedResourceKey, manager string, expected int64) (*store.ManagedResource, error) {
+	resource, exists := m.managedResources[key]
+	actualRevision, actualManager := int64(0), ""
+	if exists {
+		actualRevision, actualManager = resource.Revision, resource.Manager
+	}
+	if (expected == 0 && exists) || (expected != 0 && (!exists || resource.Revision != expected || resource.Manager != manager)) {
+		return nil, &store.ManagedResourceConflict{Key: key, ExpectedManager: manager, ExpectedRevision: expected, ActualManager: actualManager, ActualRevision: actualRevision}
+	}
+	if expected == 0 {
+		resource = store.ManagedResource{ManagedResourceKey: key, Manager: manager, Revision: 1}
+	} else {
+		resource.Revision++
+	}
+	m.managedResources[key] = resource
+	return &resource, nil
+}
+
+func (m *mockStore) ReleaseManagedResource(_ context.Context, key store.ManagedResourceKey, manager string, expected int64) error {
+	resource, exists := m.managedResources[key]
+	if !exists || resource.Manager != manager || resource.Revision != expected {
+		return &store.ManagedResourceConflict{Key: key, ExpectedManager: manager, ExpectedRevision: expected}
+	}
+	delete(m.managedResources, key)
+	return nil
+}
+
+func (m *mockStore) ListCredentialSources(_ context.Context, vaultID string) ([]store.CredentialSource, error) {
+	var sources []store.CredentialSource
+	for _, source := range m.credentialSources {
+		if source.VaultID == vaultID {
+			sources = append(sources, *source)
+		}
+	}
+	return sources, nil
+}
+
+func (m *mockStore) ListAllCredentialSources(context.Context) ([]store.CredentialSource, error) {
+	sources := make([]store.CredentialSource, 0, len(m.credentialSources))
+	for _, source := range m.credentialSources {
+		sources = append(sources, *source)
+	}
+	return sources, nil
+}
+
+func (m *mockStore) SetCredentialSource(_ context.Context, source store.CredentialSource) (*store.CredentialSource, error) {
+	if m.setCredentialSourceErr != nil {
+		return nil, m.setCredentialSourceErr
+	}
+	copy := source
+	m.credentialSources[source.VaultID+":"+source.CredentialKey] = &copy
+	return &copy, nil
+}
+
+func (m *mockStore) DeleteCredentialSource(_ context.Context, vaultID, key string) error {
+	delete(m.credentialSources, vaultID+":"+key)
+	return nil
 }
 
 func (m *mockStore) GetMasterKeyRecord(_ context.Context) (*store.MasterKeyRecord, error) {
@@ -249,6 +332,7 @@ func (m *mockStore) SetCredential(_ context.Context, vaultID, key string, cipher
 		ID:         "credential-" + key,
 		VaultID:    vaultID,
 		Key:        key,
+		Type:       "static",
 		Ciphertext: ciphertext,
 		Nonce:      nonce,
 	}
@@ -287,7 +371,7 @@ func (m *mockStore) GetVaultByID(_ context.Context, id string) (*store.Vault, er
 func (m *mockStore) GetCredential(_ context.Context, vaultID, key string) (*store.Credential, error) {
 	s, ok := m.credentials[vaultID+":"+key]
 	if !ok {
-		return nil, fmt.Errorf("credential not found")
+		return nil, sql.ErrNoRows
 	}
 	return s, nil
 }
@@ -389,9 +473,14 @@ func (m *mockStore) ExpirePendingProposals(_ context.Context, before time.Time) 
 	return 0, nil
 }
 
-func (m *mockStore) Close() error                                     { return nil }
-func (m *mockStore) Ping(_ context.Context) error                      { return nil }
-func (m *mockStore) DialectName() string                               { return "sqlite" }
+func (m *mockStore) Close() error                 { return nil }
+func (m *mockStore) Ping(_ context.Context) error { return m.pingErr }
+func (m *mockStore) DialectName() string {
+	if m.dialectName != "" {
+		return m.dialectName
+	}
+	return "sqlite"
+}
 func (m *mockStore) GetCAState(_ context.Context) (*store.CAState, error) { return nil, nil }
 func (m *mockStore) SetCAState(_ context.Context, _ *store.CAState) error { return nil }
 
@@ -506,6 +595,7 @@ func (m *mockStore) CreateVault(_ context.Context, name string) (*store.Vault, e
 		UpdatedAt: time.Now(),
 	}
 	m.vaults[name] = ns
+	m.brokerConfigs[ns.ID] = &store.BrokerConfig{ID: "broker-" + name, VaultID: ns.ID, ServicesJSON: "[]"}
 	return ns, nil
 }
 
@@ -553,8 +643,21 @@ func (m *mockStore) SetBrokerConfig(_ context.Context, vaultID, servicesJSON str
 
 func (m *mockStore) GrantVaultRole(_ context.Context, actorID, actorType, vaultID, role string) error {
 	if actorType == "agent" {
+		vaultName := ""
+		for _, vault := range m.vaults {
+			if vault.ID == vaultID {
+				vaultName = vault.Name
+				break
+			}
+		}
+		for i := range m.agentVaultGrants {
+			if m.agentVaultGrants[i].ActorID == actorID && m.agentVaultGrants[i].VaultID == vaultID {
+				m.agentVaultGrants[i].Role = role
+				return nil
+			}
+		}
 		m.agentVaultGrants = append(m.agentVaultGrants, store.VaultGrant{
-			ActorID: actorID, ActorType: "agent", VaultID: vaultID, Role: role, CreatedAt: time.Now(),
+			ActorID: actorID, ActorType: "agent", VaultID: vaultID, VaultName: vaultName, Role: role, CreatedAt: time.Now(),
 		})
 		return nil
 	}
@@ -569,6 +672,12 @@ func (m *mockStore) GrantVaultRole(_ context.Context, actorID, actorType, vaultI
 }
 
 func (m *mockStore) RevokeVaultAccess(_ context.Context, userID, vaultID string) error {
+	for i, grant := range m.agentVaultGrants {
+		if grant.ActorID == userID && grant.VaultID == vaultID {
+			m.agentVaultGrants = append(m.agentVaultGrants[:i], m.agentVaultGrants[i+1:]...)
+			return nil
+		}
+	}
 	if m.grants != nil && m.grants[userID] != nil {
 		delete(m.grants[userID], vaultID)
 		return nil
@@ -911,11 +1020,17 @@ func (m *mockStore) CreateAgent(_ context.Context, name, createdBy, role string)
 	return ag, nil
 }
 
-func (m *mockStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, expiresAt *time.Time) (*store.Agent, *store.Session, error) {
+func (m *mockStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, spiffeID, createdBy, role string, vaultGrants []store.AgentVaultGrantSpec, expiresAt *time.Time) (*store.Agent, *store.Session, error) {
+	for _, existing := range m.agents {
+		if spiffeID != "" && existing.SPIFFEID == spiffeID {
+			return nil, nil, fmt.Errorf("UNIQUE constraint failed: agents.spiffe_id")
+		}
+	}
 	ag, err := m.CreateAgent(ctx, name, createdBy, role)
 	if err != nil {
 		return nil, nil, err
 	}
+	ag.SPIFFEID = spiffeID
 	for _, vg := range vaultGrants {
 		if err := m.GrantVaultRole(ctx, ag.ID, "agent", vg.VaultID, vg.Role); err != nil {
 			return nil, nil, err
@@ -926,6 +1041,15 @@ func (m *mockStore) CreateAgentWithGrantsAndToken(ctx context.Context, name, cre
 		return nil, nil, err
 	}
 	return ag, sess, nil
+}
+
+func (m *mockStore) GetAgentBySPIFFEID(_ context.Context, spiffeID string) (*store.Agent, error) {
+	for _, ag := range m.agents {
+		if ag.SPIFFEID == spiffeID {
+			return ag, nil
+		}
+	}
+	return nil, fmt.Errorf("agent not found")
 }
 
 func (m *mockStore) GetAgentByName(_ context.Context, name string) (*store.Agent, error) {
@@ -989,9 +1113,31 @@ func (m *mockStore) ListAgents(_ context.Context, vaultID string) ([]store.Agent
 func (m *mockStore) ListAllAgents(_ context.Context) ([]store.Agent, error) {
 	var result []store.Agent
 	for _, ag := range m.agents {
-		result = append(result, *ag)
+		copy := *ag
+		copy.Vaults = nil
+		for _, grant := range m.agentVaultGrants {
+			if grant.ActorID == ag.ID {
+				copy.Vaults = append(copy.Vaults, grant)
+			}
+		}
+		result = append(result, copy)
 	}
 	return result, nil
+}
+
+func (m *mockStore) UpdateAgentSPIFFEID(_ context.Context, agentID, spiffeID string) error {
+	for _, existing := range m.agents {
+		if existing.ID != agentID && spiffeID != "" && existing.SPIFFEID == spiffeID {
+			return fmt.Errorf("UNIQUE constraint failed: agents.spiffe_id")
+		}
+	}
+	for _, ag := range m.agents {
+		if ag.ID == agentID {
+			ag.SPIFFEID = spiffeID
+			return nil
+		}
+	}
+	return fmt.Errorf("agent not found")
 }
 
 func (m *mockStore) RevokeAgent(_ context.Context, id string) error {
@@ -1262,6 +1408,127 @@ func TestHealthEndpointRejectsPost(t *testing.T) {
 
 	if rec.Code == http.StatusOK {
 		t.Fatal("expected non-200 status for POST /health")
+	}
+}
+
+func TestHealthEndpointSanitizesPostgresFailure(t *testing.T) {
+	srv := newTestServer()
+	mock := srv.store.(*mockStore)
+	mock.dialectName = "postgres"
+	mock.pingErr = errors.New("postgres://operator:never-print-this@db.example/agentvault unavailable")
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want 503", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "never-print-this") || strings.Contains(rec.Body.String(), "db.example") {
+		t.Fatalf("health response leaked database diagnostic: %s", rec.Body.String())
+	}
+	if got := rec.Body.String(); !strings.Contains(got, `"error":"database unreachable"`) {
+		t.Fatalf("health response = %s", got)
+	}
+}
+
+func TestHealthProbesSeparateLivenessFromReadiness(t *testing.T) {
+	srv := newTestServer()
+	mock := srv.store.(*mockStore)
+	mock.dialectName = "postgres"
+	mock.pingErr = errors.New("database unavailable")
+
+	for _, path := range []string{"/health/startup", "/health/live"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", rec.Code)
+	}
+}
+
+func TestHealthProbesBypassGlobalRateLimit(t *testing.T) {
+	srv := newTestServer()
+	cfg := ratelimit.DefaultsFor(ratelimit.ProfileDefault)
+	cfg.Tiers[ratelimit.TierGlobal].Rate = 0.001
+	cfg.Tiers[ratelimit.TierGlobal].Burst = 1
+	srv.rateLimit.Reload(cfg)
+	for {
+		if decision := srv.rateLimit.AllowGlobalRPS(); !decision.Allow {
+			break
+		}
+	}
+
+	for _, path := range []string{"/health", "/health/startup", "/health/ready", "/health/live"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s was rate limited: status = %d", path, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("non-probe status = %d, want 429", rec.Code)
+	}
+}
+
+func TestReadinessSPIFFEFailureIsNonSecret(t *testing.T) {
+	srv := newTestServer()
+	srv.AttachReadinessCheck("workload identity unavailable", func(context.Context) error {
+		return errors.New("SPIFFE socket /secret/path and SVID spiffe://secret.example/workload")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "workload identity unavailable") || strings.Contains(body, "secret.example") || strings.Contains(body, "/secret/path") {
+		t.Fatalf("unsafe readiness response: %s", body)
+	}
+}
+
+func TestReadinessUsesCredentialSourceMaxStaleness(t *testing.T) {
+	srv := newTestServer()
+	mock := srv.store.(*mockStore)
+	now := time.Now().UTC()
+	timePointer := func(value time.Time) *time.Time { return &value }
+	mock.credentialSources["root-ns-id:API_TOKEN"] = &store.CredentialSource{
+		VaultID: "root-ns-id", CredentialKey: "API_TOKEN",
+		Kind: store.CredentialSourceAWSSecretsManager, ProviderName: "aws-production",
+		MaxStalenessSeconds: 60, Health: store.CredentialSourceHealthStale,
+		LastSuccessAt: timePointer(now.Add(-2 * time.Minute)), CacheUpdatedAt: timePointer(now.Add(-2 * time.Minute)),
+	}
+
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request(); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "credential sources unavailable") {
+		t.Fatalf("stale source readiness = %d %s", rec.Code, rec.Body.String())
+	}
+
+	source := mock.credentialSources["root-ns-id:API_TOKEN"]
+	source.LastSuccessAt = timePointer(now)
+	source.CacheUpdatedAt = timePointer(now)
+	source.Health = store.CredentialSourceHealthError
+	if rec := request(); rec.Code != http.StatusOK {
+		t.Fatalf("usable last-known-good cache readiness = %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -4048,6 +4315,67 @@ func TestHandleAgentCreate_DefaultsToNoAccess(t *testing.T) {
 	}
 	if ag := ms.agents["newbot"]; ag == nil || ag.Role != "no-access" {
 		t.Fatalf("expected persisted agent role=no-access, got %+v", ag)
+	}
+}
+
+func TestHandleAgentCreateAndUpdateSPIFFEID(t *testing.T) {
+	srv, ms, sessID := setupAgentTest(t)
+	spiffeID := "spiffe://cluster.example/ns/agents/sa/newbot"
+	body := strings.NewReader(`{"name":"newbot","spiffe_id":"` + spiffeID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents", body)
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created["spiffe_id"] != spiffeID || ms.agents["newbot"].SPIFFEID != spiffeID {
+		t.Fatalf("SPIFFE ID not persisted/reported: %#v", created)
+	}
+
+	updated := "spiffe://cluster.example/ns/agents/sa/updated"
+	req = httptest.NewRequest(http.MethodPut, "/v1/agents/newbot/spiffe-id", strings.NewReader(`{"spiffe_id":"`+updated+`"}`))
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || ms.agents["newbot"].SPIFFEID != updated {
+		t.Fatalf("update status = %d, agent = %#v, body=%s", rec.Code, ms.agents["newbot"], rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/newbot", nil)
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), updated) {
+		t.Fatalf("get status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAgentSPIFFEIDRejectsInvalidAndDuplicateIdentity(t *testing.T) {
+	srv, _, sessID := setupAgentTest(t)
+	requestCreate := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/agents", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+sessID)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := requestCreate(`{"name":"invalidbot","spiffe_id":"https://not-spiffe.example/workload"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid ID status = %d: %s", rec.Code, rec.Body.String())
+	}
+	spiffeID := "spiffe://cluster.example/ns/agents/sa/shared"
+	if rec := requestCreate(`{"name":"firstbot","spiffe_id":"` + spiffeID + `"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("first create = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := requestCreate(`{"name":"secondbot","spiffe_id":"` + spiffeID + `"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate ID status = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -173,6 +173,37 @@ func LoadFromEnv() (Config, EnvMasks) {
 	return cfg, mask
 }
 
+// LoadResolved applies a profile and lock value already resolved by the
+// runtime configuration layer while retaining legacy per-tier environment
+// overrides. It is intended to be called once at process startup.
+func LoadResolved(profile Profile, locked bool) (Config, EnvMasks) {
+	envCfg, masks := LoadFromEnv()
+	if profile == "" {
+		profile = ProfileDefault
+	}
+	cfg := DefaultsFor(profile)
+	for t := Tier(0); t < tierCount; t++ {
+		mask := masks[t]
+		if mask.Rate {
+			cfg.Tiers[t].Rate = envCfg.Tiers[t].Rate
+		}
+		if mask.Burst {
+			cfg.Tiers[t].Burst = envCfg.Tiers[t].Burst
+		}
+		if mask.Window {
+			cfg.Tiers[t].Window = envCfg.Tiers[t].Window
+		}
+		if mask.Max {
+			cfg.Tiers[t].Max = envCfg.Tiers[t].Max
+		}
+		if mask.Concurrency {
+			cfg.Tiers[t].Concurrency = envCfg.Tiers[t].Concurrency
+		}
+	}
+	cfg.Locked = locked
+	return cfg, masks
+}
+
 // EnvSet reports whether any of a tier's knobs were set via env.
 func (m EnvSetMask) Any() bool {
 	return m.Rate || m.Burst || m.Window || m.Max || m.Concurrency

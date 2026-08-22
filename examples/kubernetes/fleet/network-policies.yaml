@@ -1,0 +1,99 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-vault-default-deny-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-vault
+      app.kubernetes.io/component: broker
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-vault-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-vault
+      app.kubernetes.io/component: broker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-vault
+              app.kubernetes.io/component: reconciler
+        - namespaceSelector:
+            matchLabels:
+              agent-vault.stigen.ai/control-plane-client: "true"
+      ports:
+        - {protocol: TCP, port: 14321}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agent-vault.stigen.ai/metrics-scrapers: "true"
+      ports:
+        - {protocol: TCP, port: 14321}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-vault-proxy-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-vault
+      app.kubernetes.io/component: broker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agent-vault.stigen.ai/relay-clients: "true"
+          podSelector:
+            matchLabels:
+              agent-vault.stigen.ai/role: relay
+      ports:
+        - {protocol: TCP, port: 14322}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-vault-reconciler-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-vault
+      app.kubernetes.io/component: reconciler
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-vault-reconciler-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-vault
+      app.kubernetes.io/component: reconciler
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-vault
+              app.kubernetes.io/component: broker
+      ports:
+        - {protocol: TCP, port: 14321}

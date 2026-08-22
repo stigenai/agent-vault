@@ -16,7 +16,10 @@ var catalogCmd = &cobra.Command{
 	Long:  `List the built-in service templates available for use in proposals. No authentication required.`,
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		addr := resolveAddress(cmd)
+		addr, err := resolveAddressWithWorkloadIdentity(cmd)
+		if err != nil {
+			return err
+		}
 		jsonOut, _ := cmd.Flags().GetBool("json")
 
 		url := fmt.Sprintf("%s/v1/service-catalog", addr)

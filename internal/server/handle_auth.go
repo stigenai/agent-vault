@@ -155,7 +155,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Auto-login: token + expires_at are returned alongside the
 		// cookie so non-cookie clients (the CLI) can persist the
 		// session without a follow-up /v1/auth/login.
-		params := newUserSessionParams(r, user.ID)
+		params := s.newUserSessionParams(r, user.ID)
 		params.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
 		session, err := s.store.CreateUserSession(ctx, params)
 		if err != nil {
@@ -277,7 +277,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Auto-login: token + expires_at are returned alongside the cookie
 	// so non-cookie clients (the CLI) can persist the session without a
 	// follow-up /v1/auth/login. Mirrors handleRegister's first-user path.
-	params := newUserSessionParams(r, user.ID)
+	params := s.newUserSessionParams(r, user.ID)
 	params.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
 	session, err := s.store.CreateUserSession(ctx, params)
 	if err != nil {
@@ -486,7 +486,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	s.rateLimit.FailureReset(ratelimit.TierVerifyFailure, resetKey)
 
 	// Create new session and auto-login.
-	resetParams := newUserSessionParams(r, user.ID)
+	resetParams := s.newUserSessionParams(r, user.ID)
 	resetParams.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
 	session, err := s.store.CreateUserSession(ctx, resetParams)
 	if err != nil {
@@ -556,18 +556,18 @@ func userKDFParams(u *store.User) crypto.KDFParams {
 // clientIP extracts the client's IP address. X-Forwarded-For is only trusted
 // when AGENT_VAULT_TRUSTED_PROXIES is configured and the direct connection
 // comes from a listed proxy. Falls back to RemoteAddr for direct connections.
-func clientIP(r *http.Request) string {
+func (s *Server) clientIP(r *http.Request) string {
 	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if remoteIP == "" {
 		remoteIP = r.RemoteAddr
 	}
 
 	// Only trust XFF when the request comes from a configured trusted proxy.
-	if len(trustedProxyCIDRs) > 0 {
+	if len(s.trustedProxyCIDRs) > 0 {
 		ip := net.ParseIP(remoteIP)
 		trusted := false
 		if ip != nil {
-			for _, cidr := range trustedProxyCIDRs {
+			for _, cidr := range s.trustedProxyCIDRs {
 				if cidr.Contains(ip) {
 					trusted = true
 					break
@@ -599,12 +599,12 @@ func init() {
 // same TTLs. DeviceLabel is left empty here because only the password
 // login path receives one in the request body — other paths set it
 // post-construction if needed.
-func newUserSessionParams(r *http.Request, userID string) store.CreateUserSessionParams {
+func (s *Server) newUserSessionParams(r *http.Request, userID string) store.CreateUserSessionParams {
 	return store.CreateUserSessionParams{
 		UserID:        userID,
 		ExpiresAt:     time.Now().Add(userSessionAbsoluteTTL),
 		IdleTTL:       userSessionIdleTTL,
-		LastIP:        clientIP(r),
+		LastIP:        s.clientIP(r),
 		LastUserAgent: r.UserAgent(),
 	}
 }
@@ -620,7 +620,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// recorded this request) and by email (reject if either is full).
 	// Normalize the email key so case/whitespace variations don't
 	// let an attacker bypass the email bucket for a legitimate user.
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	ipDecision := s.rateLimit.Check(ratelimit.TierAuth, "ip:"+ip)
 	emailDecision := s.rateLimit.Allow(ratelimit.TierAuth, "email:"+strings.ToLower(strings.TrimSpace(req.Email)))
 	if !ipDecision.Allow || !emailDecision.Allow {
@@ -652,7 +652,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params := newUserSessionParams(r, user.ID)
+	params := s.newUserSessionParams(r, user.ID)
 	params.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
 	session, err := s.store.CreateUserSession(ctx, params)
 	if err != nil {
@@ -731,7 +731,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// Invalidate all existing sessions, then create a fresh one for this request.
 	_ = s.store.DeleteUserSessions(ctx, user.ID)
 
-	params := newUserSessionParams(r, user.ID)
+	params := s.newUserSessionParams(r, user.ID)
 	params.DeviceLabel = carryDeviceLabel
 	newSess, err := s.store.CreateUserSession(ctx, params)
 	if err != nil {

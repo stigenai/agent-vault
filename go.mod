@@ -3,16 +3,26 @@ module github.com/Infisical/agent-vault
 go 1.25.0
 
 require (
+	filippo.io/age v1.2.1
+	github.com/aws/aws-sdk-go-v2 v1.27.2
+	github.com/aws/aws-sdk-go-v2/config v1.27.18
+	github.com/aws/aws-sdk-go-v2/service/kms v1.30.1
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.28.4
+	github.com/aws/smithy-go v1.20.2
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/fatih/color v1.19.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/infisical/go-sdk v0.8.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jedib0t/go-pretty/v6 v6.8.2
 	github.com/muesli/reflow v0.3.0
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/posthog/posthog-go v1.16.1
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
+	github.com/spiffe/go-spiffe/v2 v2.8.1
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/term v0.45.0
@@ -28,9 +38,8 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.1.11 // indirect
+	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
-	github.com/aws/aws-sdk-go-v2 v1.27.2 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.27.18 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.18 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.5 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.9 // indirect
@@ -41,7 +50,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.20.11 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.24.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.28.12 // indirect
-	github.com/aws/smithy-go v1.20.2 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/catppuccin/go v0.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -87,7 +95,6 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/zerolog v1.26.1 // indirect
 	github.com/sony/gobreaker v0.5.0 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

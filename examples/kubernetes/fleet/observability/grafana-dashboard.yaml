@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-vault-grafana-dashboard
+  namespace: agent-vault
+  labels:
+    grafana_dashboard: "1"
+data:
+  agent-vault-fleet.json: |
+    {
+      "annotations": {"list": []},
+      "editable": false,
+      "graphTooltip": 1,
+      "panels": [
+        {
+          "title": "Broker dependencies",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "min(agent_vault_database_up)", "legendFormat": "database"},
+            {"expr": "min(agent_vault_dek_unwrap_up)", "legendFormat": "DEK unwrap"},
+            {"expr": "min(agent_vault_spiffe_svid_up)", "legendFormat": "SPIFFE SVID"}
+          ],
+          "fieldConfig": {"defaults": {"min": 0, "max": 1, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+        },
+        {
+          "title": "SVID lifetime (seconds)",
+          "type": "timeseries",
+          "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+          "targets": [
+            {"expr": "min(agent_vault_spiffe_svid_seconds_until_expiry)", "legendFormat": "broker minimum"},
+            {"expr": "min(agent_vault_relay_spiffe_svid_seconds_until_expiry)", "legendFormat": "relay minimum"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 600}, {"color": "green", "value": 1800}]}}, "overrides": []}
+        },
+        {
+          "title": "Credential source health",
+          "type": "timeseries",
+          "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+          "targets": [{"expr": "sum by (health) (agent_vault_secret_sources)", "legendFormat": "{{health}}"}],
+          "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+        },
+        {
+          "title": "Time until provider fail-close",
+          "type": "timeseries",
+          "gridPos": {"h": 7, "w": 12, "x": 0, "y": 6},
+          "targets": [{"expr": "min(agent_vault_secret_source_seconds_until_stale)", "legendFormat": "minimum remaining"}],
+          "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []}
+        },
+        {
+          "title": "Refresh failures",
+          "type": "timeseries",
+          "gridPos": {"h": 7, "w": 12, "x": 12, "y": 6},
+          "targets": [
+            {"expr": "sum(rate(agent_vault_secret_refresh_source_failures_total[5m]))", "legendFormat": "provider failures/s"},
+            {"expr": "sum(rate(agent_vault_secret_refresh_cycle_errors_total[5m]))", "legendFormat": "scheduler errors/s"}
+          ],
+          "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+        },
+        {
+          "title": "Fleet reconcile outcomes",
+          "type": "timeseries",
+          "gridPos": {"h": 7, "w": 12, "x": 0, "y": 13},
+          "targets": [
+            {"expr": "sum(rate(agent_vault_fleet_reconcile_success_total[5m]))", "legendFormat": "success/s"},
+            {"expr": "sum(rate(agent_vault_fleet_reconcile_conflicts_total[5m]))", "legendFormat": "conflict/s"},
+            {"expr": "sum(rate(agent_vault_fleet_reconcile_failures_total[5m]))", "legendFormat": "failure/s"}
+          ],
+          "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+        },
+        {
+          "title": "Relay connectivity",
+          "type": "timeseries",
+          "gridPos": {"h": 7, "w": 12, "x": 12, "y": 13},
+          "targets": [
+            {"expr": "sum(agent_vault_relay_active_connections)", "legendFormat": "active streams"},
+            {"expr": "sum(rate(agent_vault_relay_dial_failures_total[5m]))", "legendFormat": "dial failures/s"}
+          ],
+          "fieldConfig": {"defaults": {"min": 0}, "overrides": []}
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["agent-vault", "fleet", "spiffe"],
+      "templating": {"list": []},
+      "time": {"from": "now-6h", "to": "now"},
+      "timezone": "browser",
+      "title": "Agent Vault fleet operations",
+      "uid": "agent-vault-fleet",
+      "version": 1
+    }

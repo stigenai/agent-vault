@@ -1,0 +1,73 @@
+schema_version = 1
+
+[server]
+host = "0.0.0.0"
+port = 14321
+proxy_port = 14322
+external_address = "https://agent-vault.agent-vault.svc.cluster.local"
+log_level = "info"
+detach = false
+
+[database]
+url = "file:///var/run/secrets/agent-vault/database-url"
+max_open_conns = 25
+max_idle_conns = 10
+conn_max_lifetime = "5m"
+connect_timeout = "10s"
+tls_mode = "verify-full"
+tls_root_cert = "/var/run/secrets/agent-vault/postgres-ca.crt"
+
+[proxy]
+max_request_bytes = 1073741824
+max_response_bytes = 0
+allow_private_ranges = false
+network_allowlist = []
+trusted_proxies = ["10.0.0.0/8"]
+
+[auth]
+mode = "spiffe"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+bootstrap_owner_ids = ["spiffe://cluster.example/ns/agent-vault/sa/agent-vault-reconciler"]
+
+[client]
+address = "https://agent-vault.agent-vault.svc.cluster.local"
+workload_api = "unix:///run/spire/sockets/agent.sock"
+trust_domains = ["spiffe://cluster.example"]
+
+[encryption]
+legacy_master_password = "file:///var/run/secrets/agent-vault/master-password"
+
+# Fleet secret-provider examples. Uncomment only providers configured for the
+# cluster; references in desired-state TOML select these names.
+[[secret_providers]]
+name = "aws-production"
+kind = "aws-secrets-manager"
+region = "us-east-1"
+
+# [[secret_providers]]
+# name = "bao-production"
+# kind = "openbao-kv-v2"
+# address = "https://openbao.example"
+# auth = "spiffe-x509"
+# auth_mount = "cert"
+# role = "agent-vault"
+
+# [[secret_providers]]
+# name = "onepassword-production"
+# kind = "onepassword-connect"
+# address = "https://onepassword-connect.example"
+# token = "file:///var/run/secrets/onepassword/connect-token"
+
+[logs]
+max_age = "168h"
+max_rows_per_vault = 10000
+retention_locked = true
+
+[rate_limit]
+profile = "default"
+locked = true
+
+[telemetry]
+enabled = false
+metrics_enabled = true

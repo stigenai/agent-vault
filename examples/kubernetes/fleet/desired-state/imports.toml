@@ -1,0 +1,35 @@
+schema_version = 1
+manager = "platform-bootstrap"
+
+[[vaults]]
+name = "bootstrap-secrets"
+
+# Local resolvers are evaluated only by an approved `config apply` operation.
+[[vaults.imports]]
+name = "FROM_ENV"
+from = "env://BOOTSTRAP_FROM_ENV"
+
+[[vaults.imports]]
+name = "FROM_FILE"
+from = "file:///var/run/secrets/bootstrap/from-file"
+
+[[vaults.imports]]
+name = "FROM_STDIN"
+from = "stdin://"
+
+# Provider imports fetch once in the CLI pod and become independent local
+# credentials. They do not retain these source links after apply.
+[[vaults.imports]]
+name = "FROM_AWS"
+source = "aws-production"
+ref = "agent-vault/bootstrap#value"
+
+[[vaults.imports]]
+name = "FROM_OPENBAO"
+source = "bao-production"
+ref = "secret/agent-vault/bootstrap#value"
+
+[[vaults.imports]]
+name = "FROM_ONEPASSWORD"
+source = "onepassword-production"
+ref = "platform/agent-vault/bootstrap-value"

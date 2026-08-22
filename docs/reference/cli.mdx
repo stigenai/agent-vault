@@ -113,6 +113,43 @@ description: "Complete reference for all Agent Vault CLI commands."
   </Accordion>
 </AccordionGroup>
 
+## Authentication migration
+
+<AccordionGroup>
+  <Accordion title="agent-vault auth migration status">
+    ```bash
+    agent-vault auth migration status [--json]
+    ```
+
+    Return a secret-free inventory of the current auth mode, active SPIFFE owners, active agents without SPIFFE IDs, and persisted user, agent, and scoped sessions. `ready_to_switch` is true only when the SPIFFE-only cutover has no blockers.
+  </Accordion>
+
+  <Accordion title="agent-vault auth migration bind-agent">
+    ```bash
+    agent-vault auth migration bind-agent <name> --spiffe-id spiffe://...
+    ```
+
+    Bind an existing active agent to one exact SPIFFE ID without changing its vault grants or services. Requires an instance owner.
+  </Accordion>
+
+  <Accordion title="agent-vault auth migration revoke-legacy-sessions">
+    ```bash
+    agent-vault auth migration revoke-legacy-sessions --confirm
+    ```
+
+    Transactionally revoke every persisted password session, vault-scoped token, and durable agent token. Users, agents, grants, services, and SPIFFE bindings remain intact. Run from a verified owner SVID after the hybrid soak.
+  </Accordion>
+
+  <Accordion title="agent-vault auth migration verify">
+    ```bash
+    agent-vault auth migration verify
+    ```
+
+    Fail unless the running server is in `spiffe` mode, all active agents are bound, an active SPIFFE owner exists, no persisted legacy session remains, and legacy routes are disabled. See [Migrate to SPIFFE-only authentication](/self-hosting/spiffe-migration).
+  </Accordion>
+</AccordionGroup>
+
+
 ## CA
 
 <AccordionGroup>
@@ -816,6 +853,7 @@ description: "Complete reference for all Agent Vault CLI commands."
     |------|---------|-------------|
     | `--role` | `no-access` | Instance-level role: `owner`, `member`, or `no-access` |
     | `--vault` | | Vault pre-assignment in `name:role` format (repeatable). Role defaults to `proxy`. |
+    | `--spiffe-id` | | Exact SPIFFE ID to bind at creation time. |
     | `--token-only` | `false` | Output only the raw agent token (for programmatic use) |
     | `--address` | | Agent Vault server address (defaults to session address) |
 
@@ -1037,6 +1075,45 @@ description: "Complete reference for all Agent Vault CLI commands."
     |------|---------|-------------|
     | `--invite-only` | | Enable or disable invite-only registration (`true` or `false`) |
     | `--allowed-domains` | | Comma-separated list of allowed email domains (empty to clear) |
+  </Accordion>
+</AccordionGroup>
+
+## Fleet configuration
+
+Owner-authorized fleet commands use a login session or the in-cluster CLI's rotating SPIFFE identity. See [Fleet reconciliation with SPIFFE](/guides/fleet-reconciliation) for the TOML schema, GitOps workflow, and rollback guidance.
+
+<AccordionGroup>
+  <Accordion title="agent-vault config plan">
+    ```bash
+    agent-vault config plan -f <fleet.toml> [-f <overlay.toml>] [flags]
+    ```
+
+    Load and merge desired-state TOML, validate provider references without fetching values, read redacted current state, and print a deterministic JSON plan plus its SHA-256 review digest.
+
+    | Flag | Default | Description |
+    |------|---------|-------------|
+    | `-f`, `--file` | | Fleet TOML file. Required and repeatable. Files merge in lexical path order. |
+    | `--adopt` | `false` | Plan explicit ownership of matching unmanaged resources. |
+    | `--prune` | `false` | Plan deletion of same-manager resources omitted from desired state. |
+    | `--prune-credentials` | `false` | Permit credential identity deletion when prune is also enabled. |
+  </Accordion>
+
+  <Accordion title="agent-vault config apply">
+    ```bash
+    agent-vault config apply -f <fleet.toml> \
+      --plan-sha256 sha256:<reviewed-digest> [flags]
+    ```
+
+    Rebuild and apply the exact reviewed plan. Stale digests and blocked prerequisites return a conflict before mutation. One-time import values are resolved only after approval and never accepted as command arguments.
+
+    | Flag | Default | Description |
+    |------|---------|-------------|
+    | `-f`, `--file` | | Fleet TOML file. Required and repeatable. |
+    | `--plan-sha256` | | Digest emitted by the reviewed `config plan`. |
+    | `-y`, `--yes` | `false` | Print and approve the current plan non-interactively instead of supplying a prior digest. |
+    | `--adopt` | `false` | Apply explicit unmanaged-resource adoption. Must match the reviewed plan option. |
+    | `--prune` | `false` | Delete omitted resources owned by the same manager. |
+    | `--prune-credentials` | `false` | Permit credential identity deletion when prune is also enabled. |
   </Accordion>
 </AccordionGroup>
 

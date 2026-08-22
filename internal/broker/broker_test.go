@@ -238,6 +238,44 @@ func TestAssignSlugNamesLeavesExplicitUntouched(t *testing.T) {
 	}
 }
 
+func TestOAuth2ClientCredentialsAuthBoundary(t *testing.T) {
+	auth := Auth{
+		Type:     "oauth2-client-credentials",
+		ClientID: "BLOCKS_CLIENT_ID", ClientSecret: "BLOCKS_CLIENT_SECRET",
+		TokenURL:        "https://auth.stigen.ai/oauth2/token",
+		Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+		TokenAuthMethod: "client_secret_basic",
+		Headers: map[string]string{
+			"CF-Access-Client-Id":     "{{ CF_ACCESS_CLIENT_ID }}",
+			"CF-Access-Client-Secret": "{{ CF_ACCESS_CLIENT_SECRET }}",
+		},
+	}
+	if err := auth.Validate(); err != nil {
+		t.Fatalf("valid OAuth client credentials auth rejected: %v", err)
+	}
+	keys := map[string]bool{}
+	for _, key := range auth.CredentialKeys() {
+		keys[key] = true
+	}
+	for _, key := range []string{"BLOCKS_CLIENT_ID", "BLOCKS_CLIENT_SECRET", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"} {
+		if !keys[key] {
+			t.Fatalf("credential key %s missing from boundary: %v", key, keys)
+		}
+	}
+
+	invalid := []Auth{
+		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "http://auth.example.com/token", Scopes: []string{"blocks:read"}},
+		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read blocks:write"}},
+		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read"}, Headers: map[string]string{"Authorization": "{{ OTHER }}"}},
+		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read"}, TokenAuthMethod: "none"},
+	}
+	for i := range invalid {
+		if err := invalid[i].Validate(); err == nil {
+			t.Fatalf("unsafe OAuth client credentials case %d was accepted", i)
+		}
+	}
+}
+
 func TestDisambiguateSlug(t *testing.T) {
 	taken := map[string]bool{"foo": true, "foo-2": true}
 	if got := DisambiguateSlug("foo", taken); got != "foo-3" {

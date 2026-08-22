@@ -1,0 +1,213 @@
+---
+title: "Runtime TOML configuration"
+description: "Configure Agent Vault consistently across Kubernetes fleets with validated, redacted TOML."
+---
+
+Agent Vault accepts a versioned TOML file for repeatable server deployments. The same file can be mounted into every pod, while passwords and database URLs remain in environment variables or read-only files.
+
+## Discovery and precedence
+
+The server selects at most one TOML file in this order:
+
+1. `--config /path/server.toml`
+2. `AGENT_VAULT_CONFIG`
+3. `/etc/agent-vault/server.toml`, when that file exists
+
+Effective values use the following precedence, from highest to lowest:
+
+1. Explicit CLI flags
+2. Legacy environment variables
+3. TOML
+4. Built-in defaults
+
+Unknown TOML keys, unsupported `schema_version` values, invalid types, unsafe network ranges, and conflicting database settings fail startup.
+
+## Validate and inspect
+
+Validate the exact configuration a server would use without opening a database or listener:
+
+```bash
+agent-vault config validate --config /etc/agent-vault/server.toml
+agent-vault config validate --config /etc/agent-vault/server.toml --quiet
+```
+
+`--quiet` is intended for init containers and CI; success is exit status `0`. Inspection shows every effective field and its source:
+
+```bash
+agent-vault config inspect --config /etc/agent-vault/server.toml
+agent-vault config inspect --config /etc/agent-vault/server.toml --format json
+```
+
+Resolved secret values are never printed. Inspection shows the safe reference (for example, `env://DATABASE_URL`) or `[REDACTED]` for a legacy literal secret flag.
+
+## Secret references
+
+Sensitive TOML fields accept references only:
+
+```toml
+[database]
+url = "env://DATABASE_URL"
+tls_mode = "verify-full"
+tls_root_cert = "/var/run/secrets/agent-vault/postgres-ca.crt"
+connect_timeout = "10s"
+
+[encryption]
+legacy_master_password = "file:///var/run/secrets/agent-vault/master-password"
+
+[smtp]
+password = "file:///var/run/secrets/agent-vault/smtp-password"
+```
+
+- `env://NAME` resolves one environment variable.
+- `file:///absolute/path` reads one file, suitable for Kubernetes projected Secrets, CSI volumes, or Docker secrets.
+- Resolution is limited to 64 KiB. Relative paths, traversal, command execution, and inline secret literals are rejected.
+- Referenced secret environment variables are removed from the Agent Vault process after resolution.
+
+Do not put database credentials, master passwords, or SMTP passwords directly in TOML. `--database-url` remains available for compatibility but can expose a value in process arguments; prefer a reference.
+
+## Complete schema and legacy mapping
+
+All durations use Go duration syntax such as `5m`, `24h`, or `168h`. Bare IP addresses and CIDRs are accepted in network lists.
+
+| TOML key | Default | Legacy environment / flag |
+|---|---:|---|
+| `schema_version` | `1` | none; required in a TOML file |
+| `server.host` | `127.0.0.1` | `AGENT_VAULT_HOST` / `--host` |
+| `server.port` | `14321` | `PORT` / `--port` |
+| `server.proxy_port` | `14322` | `AGENT_VAULT_MITM_PORT` / `--mitm-port` |
+| `server.external_address` | empty | `AGENT_VAULT_ADDR`; falls back to `FLY_APP_NAME` |
+| `server.log_level` | `info` | `AGENT_VAULT_LOG_LEVEL` / `--log-level` |
+| `server.detach` | `false` | `AGENT_VAULT_DETACH` / `--detach` |
+| `database.url` | empty (SQLite) | `DATABASE_URL` / `--database-url`; secret reference in TOML |
+| `database.sqlite_path` | platform default | `AGENT_VAULT_SQLITE_PATH` |
+| `database.max_open_conns` | `25` | `DB_MAX_OPEN_CONNS` |
+| `database.max_idle_conns` | `10` | `DB_MAX_IDLE_CONNS` |
+| `database.conn_max_lifetime` | `5m` | `DB_CONN_MAX_LIFETIME` |
+| `database.connect_timeout` | `10s` | `DB_CONNECT_TIMEOUT` |
+| `database.tls_mode` | empty (URL/default compatibility) | `DB_TLS_MODE`; `disable`, `require`, `verify-ca`, or `verify-full` |
+| `database.tls_root_cert` | empty | `DB_TLS_ROOT_CERT`; absolute CA bundle path required with `verify-ca` or `verify-full` |
+| `proxy.max_request_bytes` | `1073741824` | `AGENT_VAULT_MAX_REQUEST_BYTES` / `--max-request-bytes` |
+| `proxy.max_response_bytes` | `0` (unlimited) | `AGENT_VAULT_MAX_RESPONSE_BYTES` / `--max-response-bytes` |
+| `proxy.allow_private_ranges` | `false` | `AGENT_VAULT_ALLOW_PRIVATE_RANGES` |
+| `proxy.network_allowlist` | `[]` | `AGENT_VAULT_NETWORK_ALLOWLIST` |
+| `proxy.trusted_proxies` | `[]` | `AGENT_VAULT_TRUSTED_PROXIES` |
+| `auth.mode` | `legacy` | `AGENT_VAULT_AUTH_MODE` |
+| `auth.workload_api` | empty | `AGENT_VAULT_AUTH_WORKLOAD_API` |
+| `auth.trust_domains` | `[]` | `AGENT_VAULT_AUTH_TRUST_DOMAINS` |
+| `auth.bootstrap_owner_ids` | `[]` | `AGENT_VAULT_BOOTSTRAP_OWNER_IDS` |
+| `client.address` | `http://127.0.0.1:14321` | `AGENT_VAULT_ADDR` |
+| `client.vault` | empty | `AGENT_VAULT_VAULT` |
+| `client.workload_api` | empty | `SPIFFE_ENDPOINT_SOCKET` |
+| `client.trust_domains` | `[]` | `AGENT_VAULT_SPIFFE_TRUST_DOMAINS` |
+| `encryption.legacy_master_password` | empty (passwordless compatibility mode) | `AGENT_VAULT_MASTER_PASSWORD`; secret reference in TOML |
+| `encryption.primary_wrapper` | empty | none; must name a configured non-recovery wrapper |
+| `encryption.wrappers[].name` | none | none; unique stable configuration name |
+| `encryption.wrappers[].kind` | none | `aws-kms`, `openbao-transit`, or recovery-only `age-x25519` |
+| `smtp.host` | empty (SMTP disabled) | `AGENT_VAULT_SMTP_HOST` |
+| `smtp.port` | `587` | `AGENT_VAULT_SMTP_PORT` |
+| `smtp.username` | empty | `AGENT_VAULT_SMTP_USERNAME` |
+| `smtp.password` | empty | `AGENT_VAULT_SMTP_PASSWORD`; secret reference in TOML |
+| `smtp.from` | empty | `AGENT_VAULT_SMTP_FROM` |
+| `smtp.from_name` | `Agent Vault` | `AGENT_VAULT_SMTP_FROM_NAME` |
+| `smtp.tls_mode` | `opportunistic` | `AGENT_VAULT_SMTP_TLS_MODE` |
+| `smtp.tls_skip_verify` | `false` | `AGENT_VAULT_SMTP_TLS_SKIP_VERIFY` |
+| `logs.max_age` | `168h` | `AGENT_VAULT_LOGS_MAX_AGE_HOURS` (hours) |
+| `logs.max_rows_per_vault` | `10000` | `AGENT_VAULT_LOGS_MAX_ROWS_PER_VAULT` |
+| `logs.retention_locked` | `false` | `AGENT_VAULT_LOGS_RETENTION_LOCK` |
+| `rate_limit.profile` | `default` | `AGENT_VAULT_RATELIMIT_PROFILE` |
+| `rate_limit.locked` | `false` | `AGENT_VAULT_RATELIMIT_LOCK` |
+| `telemetry.enabled` | `true` | `AGENT_VAULT_TELEMETRY` / `--telemetry` |
+| `telemetry.metrics_enabled` | `false` | `AGENT_VAULT_METRICS_ENABLED` |
+
+Legacy `AGENT_VAULT_RATELIMIT_<TIER>_<KNOB>` variables remain supported for per-tier overrides. They are applied once during startup on top of `rate_limit.profile`; `rate_limit.locked = true` prevents instance-setting overrides.
+
+### DEK wrappers and offline recovery
+
+When `encryption.wrappers` is non-empty, `primary_wrapper` is required and must select AWS KMS or OpenBao Transit. AWS wrappers configure `aws_kms.key_arn` and `aws_kms.region`. OpenBao wrappers configure `openbao.address`, `mount`, `key_name`, `auth_mount`, and `role`; their provider access uses the server's rotating SPIFFE X.509-SVID. An `age-x25519` wrapper contains only `age.recipient` and can never be the primary.
+
+Startup uses only the persisted provider primary and fails closed when it is unavailable. Changing `primary_wrapper` performs verified add-before-retire rotation when both old and new wrappers remain in TOML. The age private identity is never accepted in runtime configuration. See [Encryption key recovery](/self-hosting/key-recovery) for the explicit, owner-authorized recovery procedure.
+
+### External secret providers
+
+Provider definitions are non-secret fleet configuration. Every replica builds the same registry and competes for database-backed refresh leases, so only one replica fetches a due credential. Provider values are immediately encrypted under the DEK; only the encrypted last-known-good cache is stored.
+
+```toml
+[[secret_providers]]
+name = "aws-production"
+kind = "aws-secrets-manager"
+region = "us-east-1"
+
+[[secret_providers]]
+name = "bao-production"
+kind = "openbao-kv-v2"
+address = "https://openbao.example"
+auth = "spiffe-x509" # or spiffe-jwt with audience = "..."
+auth_mount = "cert"
+role = "agent-vault"
+
+[[secret_providers]]
+name = "onepassword-production"
+kind = "onepassword-connect"
+address = "https://onepassword-connect.example"
+token = "file:///var/run/secrets/onepassword/connect-token"
+
+[[secret_providers]]
+name = "infisical-production"
+kind = "infisical"
+```
+
+AWS uses the SDK default chain, including EKS Pod Identity and IRSA. OpenBao requires server SPIFFE authentication and uses the live SPIRE Workload API source. A 1Password Connect token must be an `env://` or absolute `file://` reference; inline tokens are rejected and token files are re-read for every request.
+
+### SPIFFE authentication modes
+
+`auth.mode` accepts `legacy`, `hybrid`, or `spiffe`. Hybrid mode serves the API over TLS with a rotating SPIRE X.509-SVID, accepts a validated client SVID when present, and retains legacy bearer authentication. SPIFFE mode requires mTLS on both API and proxy listeners and rejects password, invite, and durable-token routes.
+
+Use the staged [SPIFFE-only migration runbook](/self-hosting/spiffe-migration) before changing an existing deployment from `hybrid` to `spiffe`. Its inventory and revocation commands preserve identities, vault grants, services, and encrypted data while explicitly removing persisted legacy sessions.
+
+In SPIFFE mode, `auth.workload_api` must be an absolute `unix:///` socket, every `auth.trust_domains` entry must be a trust-domain URI such as `spiffe://cluster.example`, and every `auth.bootstrap_owner_ids` entry must be an exact ID in one of those domains. The owner list is claimed transactionally once. Later TOML changes cannot add bootstrap owners; if all bootstrapped owners are removed, startup fails closed instead of replaying bootstrap.
+
+For in-cluster operator commands, configure `client.address`, `client.workload_api`, and `client.trust_domains` in the same TOML file (or use `AGENT_VAULT_ADDR`, `SPIFFE_ENDPOINT_SOCKET`, and `AGENT_VAULT_SPIFFE_TRUST_DOMAINS`). The CLI loads only the `[client]` section and does not resolve server-side database or encryption references. When workload identity is configured, every control-plane request uses the live rotating SVID, sends no bearer token, writes no `~/.agent-vault/session.json`, and never falls back to password re-authentication. `agent-vault run` cannot delegate an SVID to a child process; use the isolated Kubernetes relay for workload proxy traffic.
+
+### Workload relay listener
+
+The relay's `[relay]` table accepts `listen_address`, `remote_address`, `listener_mode`, and optional `metrics_address`. `listener_mode` defaults to `loopback` and rejects non-loopback addresses. Set `listener_mode = "network"` only when the relay runs in a separate pod protected by default-deny NetworkPolicies; network mode rejects loopback addresses so a topology mismatch fails during startup. A configured metrics listener uses SPIFFE mTLS and a non-loopback metrics address also requires network mode. See [Fleet observability](/self-hosting/observability) and the [Kubernetes relay example](https://github.com/stigenai/agent-vault/tree/main/examples/kubernetes/relay).
+
+`AGENT_VAULT_RELAY_LISTEN`, `AGENT_VAULT_RELAY_REMOTE`, `AGENT_VAULT_RELAY_LISTENER_MODE`, and `AGENT_VAULT_RELAY_METRICS_ADDRESS` override those TOML fields for compatibility. Fleet deployments should keep the topology in TOML.
+
+## Kubernetes fleet example
+
+The repository includes a validated [server TOML](https://github.com/stigenai/agent-vault/blob/main/examples/kubernetes/fleet/server.toml), [Deployment](https://github.com/stigenai/agent-vault/blob/main/examples/kubernetes/fleet/deployment.yaml), and Kustomize file that generates the ConfigMap directly from that TOML. The example mounts a separate Secret volume, connects every replica to central PostgreSQL, and runs in the foreground as Kubernetes expects.
+
+Create the referenced Secret without placing values in Git:
+
+```bash
+kubectl -n agent-vault create secret generic agent-vault-secrets \
+  --from-literal=database-url='postgres://agentvault:REPLACE@postgres.example:5432/agentvault' \
+  --from-literal=master-password="$(openssl rand -hex 32)" \
+  --from-file=postgres-ca.crt=/path/to/postgres-ca.crt
+```
+
+Apply the ConfigMap and Deployment together:
+
+```bash
+kubectl -n agent-vault apply -k examples/kubernetes/fleet
+```
+
+Validate before rollout using the same projected paths in a CI container or init container:
+
+```bash
+agent-vault config validate --config /etc/agent-vault/server.toml --quiet
+```
+
+`server.detach` should remain `false` in Kubernetes. Use Deployments for lifecycle management and send logs to stdout/stderr.
+
+## Migrating an existing deployment
+
+1. Copy current environment values into their matching TOML keys from the table above, leaving secret values as `env://` references initially.
+2. Run `agent-vault config inspect --config server.toml` and confirm expected sources. Any field still marked `environment` overrides TOML.
+3. Run `agent-vault config validate --config server.toml --quiet` in CI.
+4. Mount the file and start one canary with `agent-vault server --config /etc/agent-vault/server.toml`.
+5. Remove migrated non-secret environment variables. Keep secrets in your provider or projected files.
+6. Roll the same immutable ConfigMap across the fleet.
+
+Legacy flags and environment variables remain compatible, so migration can be incremental. Because environment values outrank TOML, forgetting to remove an old variable is visible in `config inspect` rather than silently changing the effective value.

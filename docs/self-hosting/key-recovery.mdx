@@ -1,0 +1,91 @@
+---
+title: "Encryption key recovery"
+description: "Rehearse and perform explicit, SPIFFE-authorized recovery of the Agent Vault DEK."
+---
+
+Agent Vault never falls back from AWS KMS or OpenBao Transit to the offline recovery key automatically. Recovery is a direct database operation intended for the case where the configured primary provider cannot unwrap the data-encryption key (DEK) and the server therefore cannot start.
+
+## Prerequisites
+
+- The active server TOML still contains both the original `age-x25519` recovery recipient and the new AWS KMS or OpenBao Transit primary.
+- `encryption.primary_wrapper` names that new provider wrapper.
+- The CLI pod has the same database connectivity and server TOML as the broker.
+- SPIRE has issued the CLI pod an SVID whose exact SPIFFE ID belongs to an active Agent Vault instance owner.
+- The age private identity is mounted temporarily with mode `0600` or stricter, or supplied on standard input. Never add it to TOML, an environment variable, an argument, a container image, or a Kubernetes ConfigMap.
+- For AWS KMS, the pod has IRSA or EKS Pod Identity access to `Encrypt` and `Decrypt`. For OpenBao, its SVID is authorized for the configured certificate-auth role and Transit key.
+
+Stop broker replicas before the operation. This prevents an older configuration from promoting its former primary while recovery is in progress.
+
+## Rehearsal
+
+Restore a recent database backup into an isolated namespace with a separate provider key, register the recovery operator's SPIFFE ID as an owner, and mount a copy of the offline age identity. Confirm the active TOML before touching the restored database:
+
+```bash
+agent-vault config validate --config /etc/agent-vault/server.toml
+agent-vault config inspect --config /etc/agent-vault/server.toml
+```
+
+The relevant configuration has this shape:
+
+```toml
+[encryption]
+primary_wrapper = "aws-recovery-target"
+
+[[encryption.wrappers]]
+name = "aws-recovery-target"
+kind = "aws-kms"
+
+[encryption.wrappers.aws_kms]
+key_arn = "arn:aws:kms:us-east-1:123456789012:key/REPLACEMENT"
+region = "us-east-1"
+
+[[encryption.wrappers]]
+name = "offline-age"
+kind = "age-x25519"
+
+[encryption.wrappers.age]
+recipient = "age1..."
+```
+
+## Recover
+
+Run the explicit command from the authorized CLI pod:
+
+```bash
+agent-vault owner key-recovery recover \
+  --config /etc/agent-vault/server.toml \
+  --recovery-wrapper offline-age \
+  --new-primary aws-recovery-target \
+  --identity-file /run/recovery/identity.txt \
+  --confirm-recovery
+```
+
+For standard input, use `--identity-file -`. The command:
+
+1. obtains the live SVID from `auth.workload_api` and verifies its exact database actor is active with owner role;
+2. decrypts only the selected age wrapping and verifies the recovered DEK against the instance sentinel;
+3. asks the configured KMS or Transit provider to wrap and unwrap the DEK;
+4. adds the verified ciphertext before changing any current primary; and
+5. promotes it and writes a secret-free audit event in one database transaction.
+
+If any step fails, the previous primary remains recorded and no success event is written. The private age identity and recovered DEK are wiped from process-owned byte buffers before exit.
+
+Inspect the audit trail with the same owner SVID:
+
+```bash
+agent-vault owner key-recovery history \
+  --config /etc/agent-vault/server.toml \
+  --limit 20
+```
+
+The history contains only timestamps, actor SPIFFE IDs, public provider/key identifiers, versions, and wrapping row IDs. It contains no private identity, DEK, provider token, ciphertext, or database credential.
+
+## Return to service
+
+1. Remove the private age identity volume from the pod and delete the recovery pod.
+2. Roll out the same TOML, with the recovered provider set as `primary_wrapper`, to every broker replica.
+3. Confirm broker readiness and decrypt a representative credential through the normal proxy path.
+4. Re-run `key-recovery history` and retain the event with the incident record.
+5. Repeat this drill after changing the recovery recipient, primary provider, restore process, or SPIFFE owner policy.
+
+Do not delete the old provider wrapping during the incident. Retention and retirement are separate, deliberate rotation operations after service and backups have been verified.

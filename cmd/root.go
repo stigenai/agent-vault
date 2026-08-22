@@ -30,6 +30,7 @@ func init() {
 
 func Execute() {
 	err := rootCmd.Execute()
+	closeWorkloadIdentityClient()
 	tel.Close()
 	if err == nil {
 		return
