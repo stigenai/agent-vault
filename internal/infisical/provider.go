@@ -48,7 +48,7 @@ func (r ProviderReference) Canonical() string    { return r.canonical }
 
 func NewProvider(options ProviderOptions) (*Provider, error) {
 	if options.Fetcher == nil {
-		return nil, errors.New("Infisical fetcher is required")
+		return nil, errors.New("infisical fetcher is required")
 	}
 	var legacy *VaultConfig
 	if options.LegacyConfig != nil {
@@ -57,7 +57,7 @@ func NewProvider(options ProviderOptions) (*Provider, error) {
 		copy.Environment = strings.TrimSpace(copy.Environment)
 		copy.SecretPath = strings.TrimSpace(copy.SecretPath)
 		if err := copy.Validate(); err != nil {
-			return nil, errors.New("Infisical legacy provider configuration is invalid")
+			return nil, errors.New("infisical legacy provider configuration is invalid")
 		}
 		legacy = &copy
 	}
@@ -99,7 +99,7 @@ func parseProviderReference(raw string, legacyConfig *VaultConfig) (ProviderRefe
 	}
 	parts := strings.Split(base, "/")
 	if len(parts) < 2 {
-		return result, errors.New("Infisical project and environment are required")
+		return result, errors.New("infisical project and environment are required")
 	}
 	decoded := make([]string, len(parts))
 	for i, part := range parts {
@@ -211,7 +211,7 @@ type LegacyProviderStore interface {
 // their references carry project/environment/path metadata.
 func RegisterLegacyProviders(ctx context.Context, registry *secretprovider.Registry, persistence LegacyProviderStore, fetcher SecretRetriever) error {
 	if registry == nil || persistence == nil || fetcher == nil {
-		return errors.New("Infisical legacy provider registration is invalid")
+		return errors.New("infisical legacy provider registration is invalid")
 	}
 	stores, err := persistence.ListVaultCredentialStores(ctx)
 	if err != nil {

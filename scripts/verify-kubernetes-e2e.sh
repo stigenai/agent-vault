@@ -134,6 +134,8 @@ kubectl --context "$context" wait --for=condition=Ready node --all --timeout=5m
 
 echo "installing SPIRE $spire_chart_version with short-lived X.509-SVIDs"
 stage="SPIRE installation"
+helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ \
+  --force-update >/dev/null
 helm upgrade --install spire-crds spiffe/spire-crds \
   --kube-context "$context" --namespace spire-server --create-namespace \
   --version "$spire_crds_chart_version" --wait --timeout 5m >/dev/null

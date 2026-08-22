@@ -5,7 +5,6 @@ package workloadidentity
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -170,11 +169,16 @@ func (s *Source) HybridServerTLSConfig(authorizer tlsconfig.Authorizer) (*tls.Co
 	config := tlsconfig.TLSServerConfig(s.material)
 	config.ClientAuth = tls.RequestClientCert
 	verify := tlsconfig.VerifyPeerCertificate(s.material, authorizer)
-	config.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
+	config.VerifyPeerCertificate = nil
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
 			return nil
 		}
-		return verify(rawCerts, verifiedChains)
+		rawCerts := make([][]byte, len(state.PeerCertificates))
+		for i, peer := range state.PeerCertificates {
+			rawCerts[i] = peer.Raw
+		}
+		return verify(rawCerts, state.VerifiedChains)
 	}
 	return config, nil
 }

@@ -517,7 +517,7 @@ func copyCredentialSources(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDi
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	n := 0
 	for rows.Next() {
 		var source CredentialSource
@@ -1153,7 +1153,7 @@ func copyDEKWrappings(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	n := 0
 	for rows.Next() {
 		var id, provider, keyID, keyVersion, status string
@@ -1194,7 +1194,7 @@ func copyKeyRecoveryEvents(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDi
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	n := 0
 	for rows.Next() {
 		var event KeyRecoveryEvent

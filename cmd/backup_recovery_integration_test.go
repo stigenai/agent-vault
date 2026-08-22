@@ -251,6 +251,7 @@ func TestPostgresBackupRestoreAndExplicitRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reportPath := os.Getenv("AGENT_VAULT_BACKUP_DRILL_REPORT"); reportPath != "" {
+		// #nosec G703 -- the opt-in test report path is supplied by the trusted CI operator.
 		if err := os.WriteFile(reportPath, append(reportJSON, '\n'), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -282,6 +283,7 @@ func runPostgresTool(t *testing.T, ctx context.Context, databaseURL, tool string
 	}
 	args := []string{"--host", parsed.Hostname(), "--port", port, "--username", parsed.User.Username()}
 	args = append(args, extra...)
+	// #nosec G702 -- tool is a fixed test helper name selected by this package, not untrusted input.
 	command := exec.CommandContext(ctx, tool, args...)
 	command.Env = append(os.Environ(), "PGPASSWORD="+postgresPassword(parsed), "PGSSLMODE="+postgresSSLMode(parsed))
 	if output, err := command.CombinedOutput(); err != nil {

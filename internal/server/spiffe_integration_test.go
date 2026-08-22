@@ -52,11 +52,15 @@ func TestSPIFFEOnlyListenerDowngradeRoleRotationAndRevocation(t *testing.T) {
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{serverCert},
 		ClientAuth:   tls.RequestClientCert,
-		VerifyPeerCertificate: func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
 				return nil
 			}
-			return verifyClient(rawCerts, chains)
+			rawCerts := make([][]byte, len(state.PeerCertificates))
+			for i, peer := range state.PeerCertificates {
+				rawCerts[i] = peer.Raw
+			}
+			return verifyClient(rawCerts, state.VerifiedChains)
 		},
 	}
 	srv := NewWithRuntime("127.0.0.1:0", ms, make([]byte, 32), nil, true, "https://vault.test", slog.New(slog.DiscardHandler), RuntimeOptions{
@@ -105,7 +109,8 @@ func TestSPIFFEOnlyListenerDowngradeRoleRotationAndRevocation(t *testing.T) {
 			}
 			req.Header.Set("Authorization", "Bearer legacy-token")
 			req.Header.Set("X-SPIFFE-ID", ms.agents["owner"].SPIFFEID)
-			if _, err := client.Do(req); err == nil {
+			if resp, err := client.Do(req); err == nil {
+				_ = resp.Body.Close()
 				t.Fatal("invalid presented SVID completed TLS using spoofed header or bearer token")
 			}
 		})
@@ -244,12 +249,20 @@ func (ca integrationCA) issue(t *testing.T, rawID string) (tls.Certificate, *x50
 func integrationClient(t *testing.T, bundles *x509bundle.Set, cert *tls.Certificate) *http.Client {
 	t.Helper()
 	config := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true, // go-spiffe verifies the URI SAN and bundle below.
-		VerifyPeerCertificate: tlsconfig.VerifyPeerCertificate(
-			bundles,
-			workloadidentity.AuthorizeTrustDomains(spiffeid.RequireTrustDomainFromString("cluster.example")),
-		),
+		MinVersion: tls.VersionTLS12,
+		// #nosec G402 -- VerifyConnection below performs SPIFFE bundle and URI-SAN verification.
+		InsecureSkipVerify: true,
+	}
+	verifyPeer := tlsconfig.VerifyPeerCertificate(
+		bundles,
+		workloadidentity.AuthorizeTrustDomains(spiffeid.RequireTrustDomainFromString("cluster.example")),
+	)
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		rawCerts := make([][]byte, len(state.PeerCertificates))
+		for i, peer := range state.PeerCertificates {
+			rawCerts[i] = peer.Raw
+		}
+		return verifyPeer(rawCerts, state.VerifiedChains)
 	}
 	if cert != nil {
 		config.Certificates = []tls.Certificate{*cert}

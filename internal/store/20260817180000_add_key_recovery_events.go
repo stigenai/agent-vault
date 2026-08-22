@@ -6,7 +6,7 @@ func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		timeType := "TEXT"
 		nowDefault := "(datetime('now'))"
-		if db.Dialector.Name() == "postgres" {
+		if db.Name() == "postgres" {
 			timeType = "TIMESTAMPTZ"
 			nowDefault = "NOW()"
 		}

@@ -166,7 +166,7 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 func (r *Relay) serveConn(local net.Conn) {
 	defer r.wg.Done()
 	defer r.untrack(local)
-	defer local.Close()
+	defer func() { _ = local.Close() }()
 
 	reader := bufio.NewReaderSize(local, r.lineLimit+1)
 	line, err := reader.ReadSlice('\n')
@@ -202,7 +202,7 @@ func (r *Relay) serveConn(local net.Conn) {
 		return
 	}
 	defer r.untrack(remote)
-	defer remote.Close()
+	defer func() { _ = remote.Close() }()
 	if r.onConnection != nil {
 		r.onConnection(1)
 		defer r.onConnection(-1)

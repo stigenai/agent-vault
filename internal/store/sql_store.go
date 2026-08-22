@@ -893,7 +893,7 @@ func (s *SQLStore) ListCredentialSources(ctx context.Context, vaultID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("listing credential sources: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var sources []CredentialSource
 	for rows.Next() {
 		source, err := s.scanCredentialSource(rows)
@@ -913,7 +913,7 @@ func (s *SQLStore) ListAllCredentialSources(ctx context.Context) ([]CredentialSo
 	if err != nil {
 		return nil, fmt.Errorf("listing all credential sources: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var sources []CredentialSource
 	for rows.Next() {
 		source, err := s.scanCredentialSource(rows)
@@ -2207,7 +2207,7 @@ FROM dek_wrappings`
 	if err != nil {
 		return nil, fmt.Errorf("listing DEK wrappings: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []DEKWrappingRecord
 	for rows.Next() {
 		var record DEKWrappingRecord
@@ -2360,7 +2360,7 @@ func (s *SQLStore) ListKeyRecoveryEvents(ctx context.Context, limit int) ([]KeyR
 	if err != nil {
 		return nil, fmt.Errorf("listing key recovery events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []KeyRecoveryEvent
 	for rows.Next() {
 		var event KeyRecoveryEvent

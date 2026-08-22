@@ -248,7 +248,7 @@ func readRecoveryIdentity(cmd *cobra.Command, path string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open recovery identity: %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		info, err := file.Stat()
 		if err != nil {
 			return nil, errors.New("inspect recovery identity failed")

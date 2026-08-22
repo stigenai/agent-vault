@@ -7,7 +7,7 @@ func init() {
 		blobType := "BLOB"
 		timeType := "TEXT"
 		nowDefault := "(datetime('now'))"
-		if db.Dialector.Name() == "postgres" {
+		if db.Name() == "postgres" {
 			blobType = "BYTEA"
 			timeType = "TIMESTAMPTZ"
 			nowDefault = "NOW()"

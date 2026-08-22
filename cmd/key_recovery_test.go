@@ -123,6 +123,7 @@ func TestReadRecoveryIdentityRequiresPrivateFileOrStdin(t *testing.T) {
 	if err != nil || string(identity) != "AGE-SECRET-KEY-test" {
 		t.Fatalf("private file = %q, %v", identity, err)
 	}
+	// #nosec G302 -- deliberately make the fixture unsafe to verify rejection.
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}

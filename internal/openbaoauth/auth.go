@@ -32,10 +32,12 @@ var (
 type loginRequest struct {
 	Name string `json:"name,omitempty"`
 	Role string `json:"role,omitempty"`
-	JWT  string `json:"jwt,omitempty"`
+	// #nosec G117 -- protocol-defined field carries a short-lived workload JWT.
+	JWT string `json:"jwt,omitempty"`
 }
 
 func login(ctx context.Context, client *http.Client, loginURL string, request loginRequest) ([]byte, error) {
+	// #nosec G117 -- OpenBao requires the protocol-defined jwt request field.
 	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, ErrUnavailable
@@ -50,7 +52,7 @@ func login(ctx context.Context, client *http.Client, loginURL string, request lo
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

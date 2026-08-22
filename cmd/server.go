@@ -59,18 +59,6 @@ func resolveLogLevel(flagValue string, flagChanged bool) (slog.Level, error) {
 	}
 }
 
-// resolveBaseURL returns the externally-reachable base URL for the server.
-// Priority: AGENT_VAULT_ADDR env var > FLY_APP_NAME-derived URL > http://{addr}.
-func resolveBaseURL(addr string) string {
-	if v := os.Getenv("AGENT_VAULT_ADDR"); v != "" {
-		return v
-	}
-	if app := os.Getenv("FLY_APP_NAME"); app != "" {
-		return "https://" + app + ".fly.dev"
-	}
-	return "http://" + addr
-}
-
 // buildLogger constructs the process-wide slog logger. Text handler to
 // stderr keeps it readable in a terminal without a dependency bump.
 func buildLogger(level slog.Level) *slog.Logger {

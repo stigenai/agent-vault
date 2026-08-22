@@ -143,7 +143,7 @@ func (w *Wrapper) call(ctx context.Context, operation string, requestBody any, r
 	if err != nil {
 		return errors.New("OpenBao Transit request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("OpenBao Transit %s denied", operation)

@@ -38,7 +38,7 @@ func runRelayCommand(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("start relay workload identity: %w", err)
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	domains, err := relayTrustDomains(cfg.Client.TrustDomains)
 	if err != nil {
 		return err

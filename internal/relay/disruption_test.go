@@ -137,6 +137,7 @@ func TestRelayCentralConnectTimeoutIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadGateway || time.Since(start) > 250*time.Millisecond {
 		t.Fatalf("timeout response = %d after %s", resp.StatusCode, time.Since(start))
 	}
@@ -170,7 +171,7 @@ func assertDisruptionStatus(t *testing.T, client *http.Client, want int, instanc
 
 func serveDisruptionBroker(t *testing.T, listener net.Listener, tlsConfig *tls.Config, instance string) *http.Server {
 	t.Helper()
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		id, err := x509svid.IDFromCert(req.TLS.PeerCertificates[0])
 		if err != nil || id.String() != "spiffe://cluster.example/ns/agents/sa/worker" {
 			http.Error(w, "wrong identity", http.StatusUnauthorized)

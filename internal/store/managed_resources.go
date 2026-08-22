@@ -73,7 +73,7 @@ func (s *SQLStore) ListManagedResources(ctx context.Context) ([]ManagedResource,
 	if err != nil {
 		return nil, fmt.Errorf("listing managed resources: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []ManagedResource
 	for rows.Next() {
 		resource, err := s.scanManagedResourceRow(rows)

@@ -35,7 +35,7 @@ func (s *SQLStore) InspectAuthMigration(ctx context.Context) (AuthMigrationInven
 	if err != nil {
 		return AuthMigrationInventory{}, fmt.Errorf("listing unbound auth migration agents: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {

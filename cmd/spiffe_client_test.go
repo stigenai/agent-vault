@@ -27,6 +27,7 @@ func TestEnsureSessionUsesEphemeralWorkloadIdentityWithoutPersistence(t *testing
 		t.Fatalf("session = %+v", sess)
 	}
 	path := filepath.Join(os.Getenv("HOME"), ".agent-vault", "session.json")
+	// #nosec G703 -- HOME is controlled by the isolated test environment.
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("workload identity persisted a session file: %v", err)
 	}

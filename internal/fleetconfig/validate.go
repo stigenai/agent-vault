@@ -30,9 +30,7 @@ func ValidateManifest(manifest Manifest, options LoadOptions) (*Manifest, error)
 		Manager:       manifest.Manager,
 	}
 	for _, agent := range manifest.Agents {
-		document.Agents = append(document.Agents, rawAgent{
-			Name: agent.Name, SPIFFEID: agent.SPIFFEID, Role: agent.Role,
-		})
+		document.Agents = append(document.Agents, rawAgent(agent))
 	}
 	for _, vault := range manifest.Vaults {
 		rawVault := rawVault{Name: vault.Name, Grants: append([]Grant(nil), vault.Grants...)}

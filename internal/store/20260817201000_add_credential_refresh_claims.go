@@ -5,7 +5,7 @@ import "gorm.io/gorm"
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		timeType := "TEXT"
-		if db.Dialector.Name() == "postgres" {
+		if db.Name() == "postgres" {
 			timeType = "TIMESTAMPTZ"
 		}
 		for _, statement := range []string{

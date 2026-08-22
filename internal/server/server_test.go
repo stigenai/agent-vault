@@ -22,6 +22,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/infisical"
 	"github.com/Infisical/agent-vault/internal/notify"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
@@ -1456,6 +1457,10 @@ func TestHealthProbesSeparateLivenessFromReadiness(t *testing.T) {
 
 func TestHealthProbesBypassGlobalRateLimit(t *testing.T) {
 	srv := newTestServer()
+	cfg := ratelimit.DefaultsFor(ratelimit.ProfileDefault)
+	cfg.Tiers[ratelimit.TierGlobal].Rate = 0.001
+	cfg.Tiers[ratelimit.TierGlobal].Burst = 1
+	srv.rateLimit.Reload(cfg)
 	for {
 		if decision := srv.rateLimit.AllowGlobalRPS(); !decision.Allow {
 			break
