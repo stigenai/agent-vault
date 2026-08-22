@@ -78,6 +78,7 @@ func New(opts Options) (*Relay, error) {
 	if connectTimeout < 0 {
 		return nil, errors.New("relay connect timeout must not be negative")
 	}
+	// #nosec G118 -- cancel is retained on Relay and called during Shutdown.
 	dialCtx, cancel := context.WithCancel(context.Background())
 	return &Relay{
 		remoteAddr:           opts.RemoteAddr,

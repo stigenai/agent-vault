@@ -115,6 +115,7 @@ func TestInject_OAuth2ClientCredentialsMintsAndCaches(t *testing.T) {
 	var tokenCalls int
 	tokenServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenCalls++
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse token request: %v", err)
 		}
