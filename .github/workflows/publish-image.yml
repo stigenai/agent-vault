@@ -78,11 +78,11 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.meta.outputs.date }}
-          cache-from: type=registry,ref=ghcr.io/stigenai/gastown-agent-vault:buildcache
-          cache-to: type=registry,ref=ghcr.io/stigenai/gastown-agent-vault:buildcache,mode=max
+          cache-from: type=registry,ref=ghcr.io/stigenai/agent-vault:buildcache
+          cache-to: type=registry,ref=ghcr.io/stigenai/agent-vault:buildcache,mode=max
           # Immutable source tag only. Deployments pin the digest, so there is
           # deliberately no mutable `latest` for a manifest to drift against.
-          tags: ghcr.io/stigenai/gastown-agent-vault:sha-${{ github.sha }}
+          tags: ghcr.io/stigenai/agent-vault:sha-${{ github.sha }}
       - name: Report the digest to pin
         shell: bash
         run: |
@@ -90,7 +90,7 @@ jobs:
             echo "### Agent Vault image"
             echo
             echo '```'
-            echo "  - name: ghcr.io/stigenai/gastown-agent-vault"
+            echo "  - name: ghcr.io/stigenai/agent-vault"
             echo "    digest: ${{ steps.build.outputs.digest }}"
             echo '```'
             echo
