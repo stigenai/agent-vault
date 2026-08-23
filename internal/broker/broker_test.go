@@ -244,6 +244,7 @@ func TestOAuth2ClientCredentialsAuthBoundary(t *testing.T) {
 		ClientID: "BLOCKS_CLIENT_ID", ClientSecret: "BLOCKS_CLIENT_SECRET",
 		TokenURL:        "https://auth.stigen.ai/oauth2/token",
 		Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+		Audience:        "infra-blocks-api",
 		TokenAuthMethod: "client_secret_basic",
 		Headers: map[string]string{
 			"CF-Access-Client-Id":     "{{ CF_ACCESS_CLIENT_ID }}",
@@ -266,6 +267,7 @@ func TestOAuth2ClientCredentialsAuthBoundary(t *testing.T) {
 	invalid := []Auth{
 		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "http://auth.example.com/token", Scopes: []string{"blocks:read"}},
 		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read blocks:write"}},
+		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read"}, Audience: "infra blocks api"},
 		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read"}, Headers: map[string]string{"Authorization": "{{ OTHER }}"}},
 		{Type: "oauth2-client-credentials", ClientID: "ID", ClientSecret: "SECRET", TokenURL: "https://auth.example.com/token", Scopes: []string{"blocks:read"}, TokenAuthMethod: "none"},
 	}

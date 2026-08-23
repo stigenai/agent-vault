@@ -67,6 +67,7 @@ type ServiceSpec struct {
 }
 
 type ServiceAuthSpec struct {
+	Audience        string                `json:"audience,omitempty"`
 	Kind            string                `json:"kind"`
 	Credential      string                `json:"credential,omitempty"`
 	Username        string                `json:"username,omitempty"`
@@ -101,7 +102,8 @@ func NewResource(kind, vault, name string, spec any) (Resource, error) {
 // header templates or API-key prefixes. Their hashes preserve comparison.
 func RedactService(service broker.Service) ServiceSpec {
 	auth := ServiceAuthSpec{
-		Kind: service.Auth.Type, Username: service.Auth.Username, Password: service.Auth.Password,
+		Audience: service.Auth.Audience,
+		Kind:     service.Auth.Type, Username: service.Auth.Username, Password: service.Auth.Password,
 		Header:   service.Auth.Header,
 		ClientID: service.Auth.ClientID, ClientSecret: service.Auth.ClientSecret,
 		TokenURL: service.Auth.TokenURL, Scopes: append([]string(nil), service.Auth.Scopes...),

@@ -76,6 +76,7 @@ func TestValidateManifestPreservesOAuth2ClientCredentialsAuth(t *testing.T) {
 		ClientSecret:    "BLOCKS_CLIENT_SECRET",
 		TokenURL:        "https://auth.example.com/oauth2/token",
 		Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+		Audience:        "infra-blocks-api",
 		TokenAuthMethod: "client_secret_basic",
 		Headers: map[string]string{
 			"CF-Access-Client-Id":     "{{ CF_ACCESS_CLIENT_ID }}",
@@ -467,7 +468,7 @@ name = "approval"
 [[vaults.services]]
 name = "blocks"
 host = "blocks.example.com/blocks*"
-auth = { kind = "oauth2-client-credentials", client_id = "BLOCKS_CLIENT_ID", client_secret = "BLOCKS_CLIENT_SECRET", token_url = "https://auth.example.com/oauth2/token", scopes = ["blocks:read", "blocks:write", "blocks:delete"], token_auth_method = "client_secret_basic", headers = { CF-Access-Client-Id = "{{ CF_ACCESS_CLIENT_ID }}", CF-Access-Client-Secret = "{{ CF_ACCESS_CLIENT_SECRET }}" } }
+auth = { kind = "oauth2-client-credentials", client_id = "BLOCKS_CLIENT_ID", client_secret = "BLOCKS_CLIENT_SECRET", token_url = "https://auth.example.com/oauth2/token", scopes = ["blocks:read", "blocks:write", "blocks:delete"], audience = "infra-blocks-api", token_auth_method = "client_secret_basic", headers = { CF-Access-Client-Id = "{{ CF_ACCESS_CLIENT_ID }}", CF-Access-Client-Secret = "{{ CF_ACCESS_CLIENT_SECRET }}" } }
 [[vaults.credentials]]
 name = "BLOCKS_CLIENT_ID"
 mode = "reference"
@@ -502,7 +503,7 @@ max_staleness = "1h"
 		t.Fatal(err)
 	}
 	auth := manifest.Vaults[0].Services[0].Auth
-	if auth.Kind != "oauth2-client-credentials" || auth.TokenURL != "https://auth.example.com/oauth2/token" || len(auth.Scopes) != 3 {
+	if auth.Kind != "oauth2-client-credentials" || auth.TokenURL != "https://auth.example.com/oauth2/token" || len(auth.Scopes) != 3 || auth.Audience != "infra-blocks-api" {
 		t.Fatalf("OAuth client credentials auth drifted: %#v", auth)
 	}
 }

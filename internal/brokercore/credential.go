@@ -285,7 +285,7 @@ func (p *StoreCredentialProvider) resolveClientCredentials(
 		return nil, err
 	}
 
-	fingerprint := sha256.Sum256([]byte(clientID + "\x00" + clientSecret + "\x00" + auth.TokenURL + "\x00" + strings.Join(auth.Scopes, "\x00")))
+	fingerprint := sha256.Sum256([]byte(clientID + "\x00" + clientSecret + "\x00" + auth.TokenURL + "\x00" + strings.Join(auth.Scopes, "\x00") + "\x00" + auth.Audience))
 	cacheKey := fmt.Sprintf("%s|%s|%x", vaultID, serviceName, fingerprint)
 	if cached, ok := p.clientCredentials.Load(cacheKey); ok {
 		entry := cached.(clientCredentialsCacheEntry)
@@ -303,7 +303,7 @@ func (p *StoreCredentialProvider) resolveClientCredentials(
 		}
 		token, mintErr := oauth.ClientCredentials(ctx, oauth.ClientCredentialsConfig{
 			TokenURL: auth.TokenURL, ClientID: clientID, ClientSecret: clientSecret,
-			Scopes: auth.Scopes, TokenAuthMethod: auth.TokenAuthMethod,
+			Scopes: auth.Scopes, Audience: auth.Audience, TokenAuthMethod: auth.TokenAuthMethod,
 		})
 		if mintErr != nil {
 			return oauth.RefreshResult{Err: fmt.Errorf("%w: client credentials token mint failed", ErrOAuthRefreshFailed)}

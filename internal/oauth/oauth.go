@@ -54,6 +54,7 @@ type ClientCredentialsConfig struct {
 	ClientID        string
 	ClientSecret    string
 	Scopes          []string
+	Audience        string
 	TokenAuthMethod string // "client_secret_post" (default) or "client_secret_basic"
 }
 
@@ -178,6 +179,9 @@ func ClientCredentials(ctx context.Context, cfg ClientCredentialsConfig) (*Token
 	form := url.Values{"grant_type": {"client_credentials"}}
 	if len(cfg.Scopes) > 0 {
 		form.Set("scope", strings.Join(cfg.Scopes, " "))
+	}
+	if cfg.Audience != "" {
+		form.Set("audience", cfg.Audience)
 	}
 
 	authMethod := cfg.TokenAuthMethod
