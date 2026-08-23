@@ -66,6 +66,7 @@ type Service struct {
 // Auth references credential identities only. Credential is used by bearer
 // and api-key auth; Username and Password are used by basic auth.
 type Auth struct {
+	Audience        string            `json:"audience,omitempty"`
 	Kind            string            `json:"kind"`
 	Credential      string            `json:"credential,omitempty"`
 	Username        string            `json:"username,omitempty"`
@@ -120,7 +121,7 @@ func (s Service) BrokerService() broker.Service {
 		Prefix:   s.Auth.Prefix,
 		Headers:  s.Auth.Headers,
 		ClientID: s.Auth.ClientID, ClientSecret: s.Auth.ClientSecret,
-		TokenURL: s.Auth.TokenURL, Scopes: append([]string(nil), s.Auth.Scopes...),
+		TokenURL: s.Auth.TokenURL, Scopes: append([]string(nil), s.Auth.Scopes...), Audience: s.Auth.Audience,
 		TokenAuthMethod: s.Auth.TokenAuthMethod,
 	}
 	switch s.Auth.Kind {

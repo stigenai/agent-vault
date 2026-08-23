@@ -84,7 +84,8 @@ func (s *Service) IsEnabled() bool {
 // client's request headers flow through (minus broker-scoped headers
 // like X-Vault and Proxy-Authorization, and hop-by-hop headers).
 type Auth struct {
-	Type string `yaml:"type" json:"type"` // "bearer", "basic", "api-key", "custom", "oauth2-client-credentials", "passthrough"
+	Audience string `yaml:"audience,omitempty" json:"audience,omitempty"`
+	Type     string `yaml:"type" json:"type"` // "bearer", "basic", "api-key", "custom", "oauth2-client-credentials", "passthrough"
 
 	// type: bearer — token credential key
 	Token string `yaml:"token,omitempty" json:"token,omitempty"`
@@ -213,7 +214,7 @@ func (a *Auth) Validate() error {
 		if a.ClientID == "" || a.ClientSecret == "" || a.TokenURL == "" || len(a.Scopes) == 0 {
 			return fmt.Errorf("auth: client_id, client_secret, token_url, and scopes are required for oauth2-client-credentials auth")
 		}
-		if err := checkUnexpectedFields(a, "oauth2-client-credentials", "client_id", "client_secret", "token_url", "scopes", "token_auth_method", "headers"); err != nil {
+		if err := checkUnexpectedFields(a, "oauth2-client-credentials", "client_id", "client_secret", "token_url", "scopes", "audience", "token_auth_method", "headers"); err != nil {
 			return err
 		}
 		if err := validateCredentialKey("client_id", a.ClientID); err != nil {
@@ -229,6 +230,9 @@ func (a *Auth) Validate() error {
 			if scope == "" || strings.TrimSpace(scope) != scope || strings.ContainsAny(scope, " \t\r\n\x00") {
 				return fmt.Errorf("auth: invalid OAuth scope %q", scope)
 			}
+		}
+		if a.Audience != "" && (strings.TrimSpace(a.Audience) != a.Audience || strings.ContainsAny(a.Audience, " \t\r\n\x00")) {
+			return fmt.Errorf("auth: invalid OAuth audience %q", a.Audience)
 		}
 		if a.TokenAuthMethod != "" && a.TokenAuthMethod != "client_secret_basic" && a.TokenAuthMethod != "client_secret_post" {
 			return fmt.Errorf("auth: token_auth_method must be client_secret_basic or client_secret_post")
@@ -294,6 +298,7 @@ func checkUnexpectedFields(a *Auth, authType string, allowed ...string) error {
 		{"client_secret", a.ClientSecret != ""},
 		{"token_url", a.TokenURL != ""},
 		{"scopes", len(a.Scopes) > 0},
+		{"audience", a.Audience != ""},
 		{"token_auth_method", a.TokenAuthMethod != ""},
 	}
 

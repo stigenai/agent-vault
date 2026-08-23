@@ -51,6 +51,7 @@ type rawService struct {
 }
 
 type rawAuth struct {
+	Audience        string            `toml:"audience"`
 	Kind            string            `toml:"kind"`
 	Credential      string            `toml:"credential"`
 	Username        string            `toml:"username"`

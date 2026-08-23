@@ -90,7 +90,7 @@ Content-Type: application/json
 | `basic` | `{"type": "basic", "username": "API_KEY"}` | Ashby, Jira (email + token) |
 | `api-key` | `{"type": "api-key", "key": "SECRET", "header": "x-api-key"}` | Anthropic |
 | `custom` | `{"type": "custom", "headers": {"X-Key": "{{ SECRET }}"}}` | Anything else |
-| `oauth2-client-credentials` | `{"type": "oauth2-client-credentials", "client_id": "CLIENT_ID", "client_secret": "CLIENT_SECRET", "token_url": "https://auth.example.com/oauth2/token", "scopes": ["service:read"]}` | Non-human OAuth service accounts |
+| `oauth2-client-credentials` | `{"type": "oauth2-client-credentials", "client_id": "CLIENT_ID", "client_secret": "CLIENT_SECRET", "token_url": "https://auth.example.com/oauth2/token", "scopes": ["service:read"], "audience": "service-api"}` | Non-human OAuth service accounts |
 
 ### After creating a proposal
 

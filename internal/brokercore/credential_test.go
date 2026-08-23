@@ -122,6 +122,9 @@ func TestInject_OAuth2ClientCredentialsMintsAndCaches(t *testing.T) {
 		if r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("scope") != "blocks:read blocks:write blocks:delete" {
 			t.Fatalf("unexpected token request form")
 		}
+		if r.Form.Get("audience") != "infra-blocks-api" {
+			t.Fatalf("unexpected token audience")
+		}
 		clientID, clientSecret, ok := r.BasicAuth()
 		if !ok || clientID != "client-id" || clientSecret != "client-secret" {
 			t.Fatal("unexpected client authentication")
@@ -143,6 +146,7 @@ func TestInject_OAuth2ClientCredentialsMintsAndCaches(t *testing.T) {
 			ClientID: "BLOCKS_CLIENT_ID", ClientSecret: "BLOCKS_CLIENT_SECRET",
 			TokenURL:        tokenServer.URL,
 			Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
+			Audience:        "infra-blocks-api",
 			TokenAuthMethod: "client_secret_basic",
 			Headers:         map[string]string{"CF-Access-Client-Id": "{{ CF_ACCESS_CLIENT_ID }}"},
 		},

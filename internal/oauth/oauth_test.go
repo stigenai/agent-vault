@@ -345,6 +345,9 @@ func TestClientCredentialsBasicAuth(t *testing.T) {
 		if got := r.Form.Get("scope"); got != "blocks:read blocks:write blocks:delete" {
 			t.Fatalf("scope = %q", got)
 		}
+		if got := r.Form.Get("audience"); got != "infra-blocks-api" {
+			t.Fatalf("audience = %q", got)
+		}
 		clientID, clientSecret, ok := r.BasicAuth()
 		if !ok || clientID != "six-city" || clientSecret != "secret" {
 			t.Fatal("unexpected basic auth identity")
@@ -358,6 +361,7 @@ func TestClientCredentialsBasicAuth(t *testing.T) {
 	defer server.Close()
 
 	token, err := ClientCredentials(context.Background(), ClientCredentialsConfig{
+		Audience: "infra-blocks-api",
 		TokenURL: server.URL, ClientID: "six-city", ClientSecret: "secret",
 		Scopes:          []string{"blocks:read", "blocks:write", "blocks:delete"},
 		TokenAuthMethod: "client_secret_basic",
