@@ -27,25 +27,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Prefer the self-hosted fleet-gtr pool; fall back to Depot when the fleet
-  # heartbeat says it can't host the job. Never hardcode a pool here.
-  #
-  # This resolves only because THIS repository is private. The first attempt
-  # lived in a public fork of upstream, and a public caller cannot resolve a
-  # reusable workflow out of a private repository whatever the org access policy
-  # says — that run failed at startup with zero jobs created. Being private is
-  # what buys this back, and it is the whole reason the mirror is a mirror
-  # rather than a fork: GitHub will not flip a public fork to private.
-  route:
-    uses: stigenai/infra-blocks/.github/workflows/route-runner.yml@main
-    with:
-      # 2 | 8 | 16 are the only sizes it maps. An npm frontend build plus a Go
-      # build wants the middle one.
-      size: "8"
-
   build:
-    needs: route
-    runs-on: ${{ needs.route.outputs.runner }}
+    # This public repository cannot resolve the private infra-blocks runner
+    # router. GitHub-hosted runners are free for public repositories, and the
+    # deployment's integrity boundary is the immutable image digest.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
