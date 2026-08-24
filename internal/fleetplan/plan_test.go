@@ -94,6 +94,43 @@ func TestBuildIsStableAcrossEquivalentInputOrder(t *testing.T) {
 	}
 }
 
+func TestBuildDetectsVaultUnmatchedHostPolicyDrift(t *testing.T) {
+	desired := testManifest()
+	desired.Vaults[0].UnmatchedHostPolicy = "deny"
+	current := currentFromDesired(t, desired, desired.Manager)
+
+	converged, err := Build(desired, current, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.Summary.Noop != len(converged.Operations) {
+		t.Fatalf("converged plan = %#v", converged.Summary)
+	}
+
+	vault := findOperation(t, converged, store.ManagedResourceVault, "", "github-automation")
+	for i := range current.Resources {
+		if current.Resources[i].Kind != store.ManagedResourceVault {
+			continue
+		}
+		current.Resources[i].Spec = json.RawMessage(
+			`{"name":"github-automation","unmatched_host_policy":"passthrough"}`,
+		)
+		current.Resources[i].ETag = fleetstate.Digest(current.Resources[i].Spec)
+	}
+
+	drifted, err := Build(desired, current, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted.Summary.Update != 1 {
+		t.Fatalf("drifted plan = %#v", drifted.Summary)
+	}
+	updated := findOperation(t, drifted, store.ManagedResourceVault, "", "github-automation")
+	if updated.Action != ActionUpdate || updated.DesiredETag != vault.DesiredETag {
+		t.Fatalf("vault policy update = %#v", updated)
+	}
+}
+
 func TestBuildRequiresExplicitAdoptionAndRejectsOtherManagers(t *testing.T) {
 	desired := testManifest()
 	unmanaged := currentFromDesired(t, desired, "")

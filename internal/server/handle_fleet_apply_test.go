@@ -62,6 +62,32 @@ func TestFleetApplyCreatesUpdatesAndBecomesIdempotent(t *testing.T) {
 	}
 }
 
+func TestFleetApplyConvergesVaultUnmatchedHostPolicy(t *testing.T) {
+	srv, ms, token := setupFleetApplyTest(t)
+	manifest := fleetApplyManifest()
+	manifest.Vaults[0].UnmatchedHostPolicy = "deny"
+
+	_, digest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	applyTestFleetPlan(t, srv, token, manifest, fleetplan.Options{}, digest, http.StatusOK)
+	vault := ms.vaults["fleet-vault"]
+	if vault == nil {
+		t.Fatal("fleet vault was not created")
+	}
+	if got := ms.vaultSettings[vault.ID][settingUnmatchedHostPolicy]; got != "deny" {
+		t.Fatalf("created unmatched_host_policy = %q, want deny", got)
+	}
+
+	manifest.Vaults[0].UnmatchedHostPolicy = "passthrough"
+	plan, digest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	if plan.Summary.Update != 1 {
+		t.Fatalf("policy update plan = %#v", plan.Summary)
+	}
+	applyTestFleetPlan(t, srv, token, manifest, fleetplan.Options{}, digest, http.StatusOK)
+	if got := ms.vaultSettings[vault.ID][settingUnmatchedHostPolicy]; got != "passthrough" {
+		t.Fatalf("updated unmatched_host_policy = %q, want passthrough", got)
+	}
+}
+
 func TestFleetApplyRequiresCredentialPruneAndDeletesOnlyOwnedResources(t *testing.T) {
 	srv, ms, token := setupFleetApplyTest(t)
 	manifest := fleetApplyManifest()

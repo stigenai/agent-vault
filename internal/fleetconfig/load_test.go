@@ -69,6 +69,65 @@ func TestValidateManifestCanonicalizesTransportInput(t *testing.T) {
 	}
 }
 
+func TestLoadFilesVaultUnmatchedHostPolicyDefaultsLayersAndRejectsConflicts(t *testing.T) {
+	base := writeManifest(t, "01-base.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "automation"
+`)
+	manifest, err := LoadFiles([]string{base}, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Vaults[0].UnmatchedHostPolicy; got != "passthrough" {
+		t.Fatalf("default unmatched_host_policy = %q, want passthrough", got)
+	}
+
+	overlay := writeManifest(t, "02-deny.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "automation"
+unmatched_host_policy = "deny"
+`)
+	manifest, err = LoadFiles([]string{base, overlay}, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Vaults[0].UnmatchedHostPolicy; got != "deny" {
+		t.Fatalf("layered unmatched_host_policy = %q, want deny", got)
+	}
+
+	invalid := writeManifest(t, "03-invalid.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "invalid"
+unmatched_host_policy = "log-and-allow"
+`)
+	if _, err := LoadFiles([]string{invalid}, testOptions()); err == nil ||
+		!strings.Contains(err.Error(), "must be passthrough or deny") {
+		t.Fatalf("invalid unmatched_host_policy error = %v", err)
+	}
+
+	passthrough := writeManifest(t, "04-passthrough.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[vaults]]
+name = "automation"
+unmatched_host_policy = "passthrough"
+`)
+	if _, err := LoadFiles([]string{overlay, passthrough}, testOptions()); err == nil ||
+		!strings.Contains(err.Error(), "conflicting unmatched_host_policy") {
+		t.Fatalf("conflicting unmatched_host_policy error = %v", err)
+	}
+}
+
 func TestValidateManifestPreservesOAuth2ClientCredentialsAuth(t *testing.T) {
 	want := Auth{
 		Kind:            "oauth2-client-credentials",

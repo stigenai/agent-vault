@@ -8,6 +8,7 @@ role = "no-access"
 
 [[vaults]]
 name = "github-automation"
+unmatched_host_policy = "deny"
 
 [[vaults.grants]]
 agent = "pr-reviewer"

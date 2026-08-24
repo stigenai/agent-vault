@@ -314,8 +314,15 @@ func desiredResources(manifest *fleetconfig.Manifest) (map[identity]desiredResou
 		return nil
 	}
 	for _, vault := range manifest.Vaults {
+		policy := vault.UnmatchedHostPolicy
+		if policy == "" {
+			policy = "passthrough"
+		}
 		if err := add(identity{kind: store.ManagedResourceVault, name: vault.Name},
-			fleetstate.VaultSpec{Name: vault.Name}, Details{}, nil); err != nil {
+			fleetstate.VaultSpec{
+				Name:                vault.Name,
+				UnmatchedHostPolicy: policy,
+			}, Details{}, nil); err != nil {
 			return nil, err
 		}
 	}
