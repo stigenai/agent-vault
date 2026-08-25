@@ -30,7 +30,8 @@ type Resource struct {
 }
 
 type VaultSpec struct {
-	Name string `json:"name"`
+	Name                string `json:"name"`
+	UnmatchedHostPolicy string `json:"unmatched_host_policy"`
 }
 
 type AgentSpec struct {

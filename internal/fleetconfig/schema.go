@@ -39,11 +39,12 @@ type Agent struct {
 
 // Vault contains resources scoped to one vault.
 type Vault struct {
-	Name        string       `json:"name"`
-	Grants      []Grant      `json:"grants,omitempty"`
-	Services    []Service    `json:"services,omitempty"`
-	Credentials []Credential `json:"credentials,omitempty"`
-	Imports     []Import     `json:"imports,omitempty"`
+	Name                string       `json:"name"`
+	UnmatchedHostPolicy string       `json:"unmatched_host_policy"`
+	Grants              []Grant      `json:"grants,omitempty"`
+	Services            []Service    `json:"services,omitempty"`
+	Credentials         []Credential `json:"credentials,omitempty"`
+	Imports             []Import     `json:"imports,omitempty"`
 }
 
 // Grant gives an existing agent a role in a vault.

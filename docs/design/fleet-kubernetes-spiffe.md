@@ -161,6 +161,7 @@ manager = "platform-fleet"
 
 [[vaults]]
 name = "github-automation"
+unmatched_host_policy = "deny"
 
 [[vaults.agents]]
 name = "pr-reviewer"
@@ -180,6 +181,11 @@ ref = "arn:aws:secretsmanager:us-east-1:123456789012:secret:github#token"
 refresh_interval = "5m"
 max_staleness = "1h"
 ```
+
+`unmatched_host_policy` accepts `deny` or `passthrough`. It defaults to
+`passthrough` for compatibility; managed production vaults should declare
+`deny` so requests outside their service allowlist fail closed and policy drift
+appears in the reviewed plan.
 
 Apply behavior is server-side, idempotent, and ownership-aware:
 

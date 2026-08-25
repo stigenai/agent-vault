@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/broker"
+	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
@@ -33,7 +34,11 @@ func ValidateManifest(manifest Manifest, options LoadOptions) (*Manifest, error)
 		document.Agents = append(document.Agents, rawAgent(agent))
 	}
 	for _, vault := range manifest.Vaults {
-		rawVault := rawVault{Name: vault.Name, Grants: append([]Grant(nil), vault.Grants...)}
+		rawVault := rawVault{
+			Name:                vault.Name,
+			UnmatchedHostPolicy: vault.UnmatchedHostPolicy,
+			Grants:              append([]Grant(nil), vault.Grants...),
+		}
 		for _, service := range vault.Services {
 			rawService := rawService{
 				Name: service.Name, Host: service.Host, Path: service.Path,
@@ -103,10 +108,27 @@ func normalizeAndValidate(documents []rawManifest, options LoadOptions) (*Manife
 			if err := broker.ValidateSlug(rawVault.Name); err != nil {
 				return nil, fmt.Errorf("vault %q: %w", rawVault.Name, err)
 			}
+			policy := brokercore.UnmatchedHostPolicy(rawVault.UnmatchedHostPolicy)
+			if policy != "" && !brokercore.IsValidUnmatchedHostPolicy(policy) {
+				return nil, fmt.Errorf(
+					"vault %q: unmatched_host_policy must be passthrough or deny",
+					rawVault.Name,
+				)
+			}
 			vault := vaults[rawVault.Name]
 			if vault == nil {
 				vault = &Vault{Name: rawVault.Name}
 				vaults[rawVault.Name] = vault
+			}
+			if policy != "" && vault.UnmatchedHostPolicy != "" &&
+				vault.UnmatchedHostPolicy != string(policy) {
+				return nil, fmt.Errorf(
+					"vault %q: conflicting unmatched_host_policy declarations",
+					rawVault.Name,
+				)
+			}
+			if policy != "" {
+				vault.UnmatchedHostPolicy = string(policy)
 			}
 
 			for _, raw := range rawVault.Agents {
@@ -160,6 +182,9 @@ func normalizeAndValidate(documents []rawManifest, options LoadOptions) (*Manife
 	}
 
 	for _, vault := range vaults {
+		if vault.UnmatchedHostPolicy == "" {
+			vault.UnmatchedHostPolicy = string(brokercore.PolicyPassthrough)
+		}
 		for _, grant := range vault.Grants {
 			if _, ok := agents[grant.Agent]; !ok {
 				return nil, fmt.Errorf("vault %q: grant references undefined agent %q", vault.Name, grant.Agent)

@@ -217,11 +217,21 @@ func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest
 	var key store.ManagedResourceKey
 	switch ref.Kind {
 	case store.ManagedResourceVault:
+		desired, ok := desiredVault(manifest, ref.Name)
+		if !ok {
+			return errors.New("desired vault missing")
+		}
 		vault, err := s.store.CreateVault(ctx, ref.Name)
 		if err != nil {
 			if existing, lookupErr := s.store.GetVault(ctx, ref.Name); lookupErr == nil && existing != nil {
 				return sql.ErrNoRows
 			}
+			return err
+		}
+		if err := s.store.SetVaultSetting(
+			ctx, vault.ID, settingUnmatchedHostPolicy, desired.UnmatchedHostPolicy,
+		); err != nil {
+			_ = s.store.DeleteVault(ctx, ref.Name)
 			return err
 		}
 		key = store.ManagedResourceKey{Kind: ref.Kind, ResourceID: vault.ID}
@@ -274,7 +284,17 @@ func (s *Server) createFleetResource(ctx context.Context, actor *Actor, manifest
 func (s *Server) mutateFleetResource(ctx context.Context, manifest *fleetconfig.Manifest, imports map[fleetImportKey][]byte, ref fleetplan.ResourceRef) error {
 	switch ref.Kind {
 	case store.ManagedResourceVault:
-		return nil
+		desired, ok := desiredVault(manifest, ref.Name)
+		if !ok {
+			return errors.New("desired vault missing")
+		}
+		vault, err := s.store.GetVault(ctx, ref.Name)
+		if err != nil {
+			return err
+		}
+		return s.store.SetVaultSetting(
+			ctx, vault.ID, settingUnmatchedHostPolicy, desired.UnmatchedHostPolicy,
+		)
 	case store.ManagedResourceAgent:
 		desired, ok := desiredAgent(manifest, ref.Name)
 		if !ok {
@@ -476,6 +496,15 @@ func (s *Server) resolveManagedResourceKey(ctx context.Context, ref fleetplan.Re
 	default:
 		return store.ManagedResourceKey{}, errors.New("unsupported resource identity")
 	}
+}
+
+func desiredVault(manifest *fleetconfig.Manifest, name string) (fleetconfig.Vault, bool) {
+	for _, vault := range manifest.Vaults {
+		if vault.Name == name {
+			return vault, true
+		}
+	}
+	return fleetconfig.Vault{}, false
 }
 
 func desiredAgent(manifest *fleetconfig.Manifest, name string) (fleetconfig.Agent, bool) {

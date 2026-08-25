@@ -25,12 +25,13 @@ type rawAgent struct {
 }
 
 type rawVault struct {
-	Name        string          `toml:"name"`
-	Agents      []rawVaultAgent `toml:"agents"`
-	Grants      []Grant         `toml:"grants"`
-	Services    []rawService    `toml:"services"`
-	Credentials []rawCredential `toml:"credentials"`
-	Imports     []rawImport     `toml:"imports"`
+	Name                string          `toml:"name"`
+	UnmatchedHostPolicy string          `toml:"unmatched_host_policy"`
+	Agents              []rawVaultAgent `toml:"agents"`
+	Grants              []Grant         `toml:"grants"`
+	Services            []rawService    `toml:"services"`
+	Credentials         []rawCredential `toml:"credentials"`
+	Imports             []rawImport     `toml:"imports"`
 }
 
 type rawVaultAgent struct {

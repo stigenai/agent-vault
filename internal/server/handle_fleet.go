@@ -49,9 +49,18 @@ func (s *Server) buildFleetState(ctx context.Context) (fleetstate.State, error) 
 	result := fleetstate.State{SchemaVersion: fleetstate.SchemaVersion}
 
 	for _, vault := range vaults {
+		policy, err := readUnmatchedHostPolicy(ctx, s.store, vault.ID)
+		if err != nil {
+			return fleetstate.State{}, fmt.Errorf(
+				"reading unmatched host policy for vault %q: %w", vault.Name, err,
+			)
+		}
 		if err := appendFleetResource(&result.Resources, ownership,
 			store.ManagedResourceKey{Kind: store.ManagedResourceVault, ResourceID: vault.ID},
-			vault.Name, "", fleetstate.VaultSpec{Name: vault.Name}); err != nil {
+			vault.Name, "", fleetstate.VaultSpec{
+				Name:                vault.Name,
+				UnmatchedHostPolicy: string(policy),
+			}); err != nil {
 			return fleetstate.State{}, err
 		}
 		if err := s.appendVaultFleetState(ctx, &result.Resources, ownership, vault); err != nil {
