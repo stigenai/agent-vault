@@ -126,6 +126,50 @@ The check requires all readiness blockers to remain clear, `auth_mode` to equal 
 - every pre-revocation bearer token returns `401` on protected routes;
 - SVID-authenticated discovery and representative brokering still use the original grants and services.
 
+## Human administration after the switch
+
+Do not re-enable password or session routes to regain browser access. Reconcile a dedicated human-admin workload as an exact SPIFFE owner and give it `admin` grants only on the vaults an operator must manage:
+
+```toml
+[[agents]]
+name = "human-admin"
+spiffe_id = "spiffe://cluster.example/ns/agent-vault/sa/agent-vault-human-admin"
+role = "owner"
+
+[[vaults.grants]]
+agent = "human-admin"
+role = "admin"
+```
+
+Run `agent-vault owner bridge` in a normally-zero-replica Kubernetes Deployment. The pod needs only the public `[client]` TOML and SPIFFE CSI socket. It must have no service-account token, Secret volume, database configuration, master password, provider credential, or city credential. Bind the process to loopback and use a fixed loopback browser origin:
+
+```bash
+agent-vault owner bridge \
+  --config /etc/agent-vault/server.toml \
+  --listen 127.0.0.1:19443 \
+  --public-origin http://127.0.0.1:19443
+```
+
+Activate and reach it only through audited Kubernetes operations:
+
+```bash
+kubectl -n agent-vault scale deployment/agent-vault-human-admin --replicas=1
+kubectl -n agent-vault wait --for=condition=available deployment/agent-vault-human-admin --timeout=120s
+kubectl -n agent-vault port-forward deployment/agent-vault-human-admin 19443:19443
+open http://127.0.0.1:19443
+```
+
+For authorization-code OAuth, register exactly `http://127.0.0.1:19443/v1/oauth/callback` with the provider. The bridge strips browser bearer/session credentials and spoofed forwarding or identity headers, authenticates upstream with its rotating SVID, and injects only the fixed loopback origin. Agent Vault accepts that origin only from a SPIFFE-authenticated instance owner, stores the exact callback with the OAuth state, and reuses it for token exchange. Arbitrary origins, extra paths, userinfo, queries, fragments, implicit ports, and non-loopback addresses fail closed.
+
+Scale the Deployment back to zero immediately after the management window and verify no pod remains:
+
+```bash
+kubectl -n agent-vault scale deployment/agent-vault-human-admin --replicas=0
+kubectl -n agent-vault wait --for=delete pod -l app.kubernetes.io/name=agent-vault-human-admin --timeout=120s
+```
+
+Use default-deny ingress and egress policy for the Deployment; allow egress only to DNS and the Agent Vault API. The SPIFFE CSI socket is local and needs no network allowance. Audit Kubernetes scale and port-forward authorization plus Agent Vault's SVID-attributed control-plane events. Bridge output reports only method and coarse route class; it never records URL queries, headers, request bodies, OAuth codes, state, or provider errors.
+
 ## Rollback after the switch
 
 Authentication rollback does not require restoring PostgreSQL because identities and grants were preserved:
