@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net"
@@ -11,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,11 +24,17 @@ import (
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
 	"github.com/spf13/cobra"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 )
 
 const (
-	defaultAdminBridgeListen = "127.0.0.1:19443"
-	defaultAdminBridgeOrigin = "http://127.0.0.1:19443"
+	defaultAdminBridgeListen       = "127.0.0.1:19443"
+	defaultAdminBridgeOrigin       = "http://127.0.0.1:19443"
+	adminBridgeCapabilityParam     = "av_owner_capability"
+	adminBridgeSessionCookie       = "agent_vault_owner_bridge"
+	adminBridgeCapabilityTTL       = 10 * time.Minute
+	adminBridgeSessionTTL          = 30 * time.Minute
+	adminBridgeCapabilityByteCount = 32
 )
 
 var adminBridgeCmd = &cobra.Command{
@@ -43,6 +54,10 @@ func runAdminBridgeCommand(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	publicOrigin, err := cmd.Flags().GetString("public-origin")
+	if err != nil {
+		return err
+	}
+	serverSPIFFEID, err := cmd.Flags().GetString("server-spiffe-id")
 	if err != nil {
 		return err
 	}
@@ -67,11 +82,15 @@ func runAdminBridgeCommand(cmd *cobra.Command, _ []string) error {
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	source, transport, err := newAdminBridgeSPIFFETransport(ctx, client)
+	source, transport, err := newAdminBridgeSPIFFETransport(ctx, client, serverSPIFFEID)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = source.Close() }()
+	capabilityGate, bootstrapCapability, err := newAdminBridgeCapabilityGate(time.Now)
+	if err != nil {
+		return fmt.Errorf("generate admin bridge owner capability: %w", err)
+	}
 
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -82,7 +101,7 @@ func runAdminBridgeCommand(cmd *cobra.Command, _ []string) error {
 	audit := func(event string) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "agent-vault: admin bridge %s\n", event)
 	}
-	handler := newAdminBridgeHandler(target, transport, publicOrigin, source.Ready, audit)
+	handler := newAdminBridgeHandler(target, transport, publicOrigin, capabilityGate, source.Ready, audit)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -94,7 +113,14 @@ func runAdminBridgeCommand(cmd *cobra.Command, _ []string) error {
 
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
-	audit("started; access requires a Kubernetes port-forward")
+	audit("started; access requires a Kubernetes port-forward and one-time owner capability")
+	_, _ = fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"Open this one-time admin URL within 10 minutes: %s/?%s=%s\n",
+		strings.TrimSuffix(publicOrigin, "/"),
+		adminBridgeCapabilityParam,
+		bootstrapCapability,
+	)
 	select {
 	case err := <-done:
 		if err != nil && err != http.ErrServerClosed {
@@ -109,20 +135,16 @@ func runAdminBridgeCommand(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-func newAdminBridgeSPIFFETransport(ctx context.Context, client runtimeconfig.Client) (*workloadidentity.Source, http.RoundTripper, error) {
-	domains := make([]spiffeid.TrustDomain, 0, len(client.TrustDomains))
-	for _, raw := range client.TrustDomains {
-		domain, err := spiffeid.TrustDomainFromString(strings.TrimPrefix(raw, "spiffe://"))
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid admin bridge SPIFFE trust domain %q: %w", raw, err)
-		}
-		domains = append(domains, domain)
+func newAdminBridgeSPIFFETransport(ctx context.Context, client runtimeconfig.Client, rawServerID string) (*workloadidentity.Source, http.RoundTripper, error) {
+	serverID, err := validateAdminBridgeServerID(rawServerID, client.TrustDomains)
+	if err != nil {
+		return nil, nil, err
 	}
 	source, err := workloadidentity.New(ctx, workloadidentity.Options{Address: client.WorkloadAPI})
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect admin bridge to SPIRE Workload API: %w", err)
 	}
-	tlsConfig, err := source.ClientTLSConfig(workloadidentity.AuthorizeTrustDomains(domains...))
+	tlsConfig, err := source.ClientTLSConfig(tlsconfig.AuthorizeID(serverID))
 	if err != nil {
 		_ = source.Close()
 		return nil, nil, fmt.Errorf("configure admin bridge SPIFFE mTLS: %w", err)
@@ -133,7 +155,98 @@ func newAdminBridgeSPIFFETransport(ctx context.Context, client runtimeconfig.Cli
 	return source, &clientHeaderTransport{base: &spiffeRoundTripper{base: transport}}, nil
 }
 
-func newAdminBridgeHandler(target *url.URL, transport http.RoundTripper, publicOrigin string, ready func() error, audit func(string)) http.Handler {
+func validateAdminBridgeServerID(rawServerID string, trustDomains []string) (spiffeid.ID, error) {
+	serverID, err := spiffeid.FromString(rawServerID)
+	if err != nil {
+		return spiffeid.ID{}, fmt.Errorf("invalid --server-spiffe-id: %w", err)
+	}
+	serverTrustDomainConfigured := false
+	for _, raw := range trustDomains {
+		domain, err := spiffeid.TrustDomainFromString(strings.TrimPrefix(raw, "spiffe://"))
+		if err != nil {
+			return spiffeid.ID{}, fmt.Errorf("invalid admin bridge SPIFFE trust domain %q: %w", raw, err)
+		}
+		if domain == serverID.TrustDomain() {
+			serverTrustDomainConfigured = true
+		}
+	}
+	if !serverTrustDomainConfigured {
+		return spiffeid.ID{}, fmt.Errorf("--server-spiffe-id trust domain is not configured in client.trust_domains")
+	}
+	return serverID, nil
+}
+
+type adminBridgeCapabilityGate struct {
+	mu            sync.Mutex
+	bootstrapHash [sha256.Size]byte
+	sessionHash   [sha256.Size]byte
+	expiresAt     time.Time
+	sessionExpiry time.Time
+	consumed      bool
+	now           func() time.Time
+}
+
+func newAdminBridgeCapabilityGate(now func() time.Time) (*adminBridgeCapabilityGate, string, error) {
+	if now == nil {
+		now = time.Now
+	}
+	bootstrap, err := randomAdminBridgeToken()
+	if err != nil {
+		return nil, "", err
+	}
+	return &adminBridgeCapabilityGate{
+		bootstrapHash: sha256.Sum256([]byte(bootstrap)),
+		expiresAt:     now().Add(adminBridgeCapabilityTTL),
+		now:           now,
+	}, bootstrap, nil
+}
+
+func randomAdminBridgeToken() (string, error) {
+	raw := make([]byte, adminBridgeCapabilityByteCount)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (g *adminBridgeCapabilityGate) bootstrap(rawCapability string) (string, time.Time, bool, error) {
+	if g == nil || rawCapability == "" {
+		return "", time.Time{}, false, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.consumed || !g.now().Before(g.expiresAt) {
+		return "", time.Time{}, false, nil
+	}
+	candidate := sha256.Sum256([]byte(rawCapability))
+	if subtle.ConstantTimeCompare(candidate[:], g.bootstrapHash[:]) != 1 {
+		return "", time.Time{}, false, nil
+	}
+	session, err := randomAdminBridgeToken()
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	g.sessionHash = sha256.Sum256([]byte(session))
+	g.sessionExpiry = g.now().Add(adminBridgeSessionTTL)
+	g.bootstrapHash = [sha256.Size]byte{}
+	g.consumed = true
+	return session, g.sessionExpiry, true, nil
+}
+
+func (g *adminBridgeCapabilityGate) authorized(rawSession string) bool {
+	if g == nil || rawSession == "" {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.consumed || !g.now().Before(g.sessionExpiry) {
+		return false
+	}
+	candidate := sha256.Sum256([]byte(rawSession))
+	return subtle.ConstantTimeCompare(candidate[:], g.sessionHash[:]) == 1
+}
+
+func newAdminBridgeHandler(target *url.URL, transport http.RoundTripper, publicOrigin string, capabilityGate *adminBridgeCapabilityGate, ready func() error, audit func(string)) http.Handler {
 	publicOriginURL, _ := url.Parse(publicOrigin)
 	publicHost := publicOriginURL.Host
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -175,6 +288,8 @@ func newAdminBridgeHandler(target *url.URL, transport http.RoundTripper, publicO
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		if !isLoopbackRemoteAddress(r.RemoteAddr) {
 			http.Error(w, "admin bridge accepts loopback clients only", http.StatusForbidden)
 			return
@@ -194,6 +309,43 @@ func newAdminBridgeHandler(target *url.URL, transport http.RoundTripper, publicO
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if values, present := r.URL.Query()[adminBridgeCapabilityParam]; present {
+			if r.Method != http.MethodGet || r.URL.Path != "/" || len(r.URL.Query()) != 1 || len(values) != 1 {
+				http.Error(w, "invalid owner capability bootstrap request", http.StatusBadRequest)
+				return
+			}
+			session, expiresAt, ok, err := capabilityGate.bootstrap(values[0])
+			if err != nil {
+				http.Error(w, "owner capability unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if !ok {
+				http.Error(w, "owner capability invalid or expired", http.StatusUnauthorized)
+				return
+			}
+			// #nosec G124 -- OAuth native-app loopback redirects intentionally use
+			// HTTP. Host-only, HttpOnly, SameSite=Lax, short lifetime, exact
+			// Host/Origin checks, and the in-memory capability gate are the boundary.
+			http.SetCookie(w, &http.Cookie{
+				Name:     adminBridgeSessionCookie,
+				Value:    session,
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				MaxAge:   int(adminBridgeSessionTTL.Seconds()),
+				Expires:  expiresAt,
+			})
+			if audit != nil {
+				audit("owner capability consumed")
+			}
+			http.Redirect(w, r, strings.TrimSuffix(publicOrigin, "/")+"/", http.StatusSeeOther)
+			return
+		}
+		cookies := r.CookiesNamed(adminBridgeSessionCookie)
+		if len(cookies) != 1 || !capabilityGate.authorized(cookies[0].Value) {
+			http.Error(w, "owner capability required", http.StatusUnauthorized)
 			return
 		}
 		if audit != nil {
@@ -252,5 +404,7 @@ func init() {
 	adminBridgeCmd.Flags().String("config", "", "path to versioned TOML containing the public [client] configuration")
 	adminBridgeCmd.Flags().String("listen", defaultAdminBridgeListen, "loopback listen address used inside the admin bridge pod")
 	adminBridgeCmd.Flags().String("public-origin", defaultAdminBridgeOrigin, "exact browser loopback origin used by the Kubernetes port-forward")
+	adminBridgeCmd.Flags().String("server-spiffe-id", "", "exact Agent Vault server SPIFFE ID required for upstream mTLS")
+	_ = adminBridgeCmd.MarkFlagRequired("server-spiffe-id")
 	ownerCmd.AddCommand(adminBridgeCmd)
 }

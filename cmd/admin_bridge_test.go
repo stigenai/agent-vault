@@ -10,9 +10,38 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Infisical/agent-vault/internal/oauth"
 )
+
+func newAuthorizedAdminBridgeTestHandler(
+	t *testing.T,
+	target *url.URL,
+	transport http.RoundTripper,
+	ready func() error,
+	audit func(string),
+) (http.Handler, *http.Cookie) {
+	t.Helper()
+	gate, capability, err := newAdminBridgeCapabilityGate(time.Now)
+	if err != nil {
+		t.Fatalf("new capability gate: %v", err)
+	}
+	handler := newAdminBridgeHandler(target, transport, defaultAdminBridgeOrigin, gate, ready, audit)
+	req := httptest.NewRequest(http.MethodGet, "/?"+adminBridgeCapabilityParam+"="+url.QueryEscape(capability), nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = "127.0.0.1:19443"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("capability bootstrap status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("capability bootstrap cookies = %d, want 1", len(cookies))
+	}
+	return handler, cookies[0]
+}
 
 func TestAdminBridgeForwardsOnlySPIFFEIdentityAndSafeOAuthOrigin(t *testing.T) {
 	t.Parallel()
@@ -36,7 +65,7 @@ func TestAdminBridgeForwardsOnlySPIFFEIdentityAndSafeOAuthOrigin(t *testing.T) {
 	}
 
 	var audit bytes.Buffer
-	handler := newAdminBridgeHandler(target, http.DefaultTransport, defaultAdminBridgeOrigin, nil, func(event string) {
+	handler, ownerCookie := newAuthorizedAdminBridgeTestHandler(t, target, http.DefaultTransport, nil, func(event string) {
 		audit.WriteString(event + "\n")
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/credentials/oauth/connect?state=browser-secret", strings.NewReader(`{"client_secret":"body-secret"}`))
@@ -51,6 +80,7 @@ func TestAdminBridgeForwardsOnlySPIFFEIdentityAndSafeOAuthOrigin(t *testing.T) {
 	req.Header.Set("X-Real-IP", "203.0.113.10")
 	req.Header.Set("X-SPIFFE-ID", "spiffe://attacker.example/workload")
 	req.Header.Set(oauth.LoopbackRedirectOriginHeader, "http://attacker.example:19443")
+	req.AddCookie(ownerCookie)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -97,12 +127,13 @@ func TestAdminBridgeCallbackForwardsQueryWithoutAuditingValues(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	target, _ := url.Parse(upstream.URL)
 	var audit bytes.Buffer
-	handler := newAdminBridgeHandler(target, http.DefaultTransport, defaultAdminBridgeOrigin, nil, func(event string) {
+	handler, ownerCookie := newAuthorizedAdminBridgeTestHandler(t, target, http.DefaultTransport, nil, func(event string) {
 		audit.WriteString(event)
 	})
 	req := httptest.NewRequest(http.MethodGet, "/v1/oauth/callback?code=oauth-code-secret&state=oauth-state-secret", nil)
 	req.RemoteAddr = "[::1]:54321"
 	req.Host = "127.0.0.1:19443"
+	req.AddCookie(ownerCookie)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -126,7 +157,7 @@ func TestAdminBridgeRejectsNonLoopbackClient(t *testing.T) {
 		return nil, errors.New("must not be called")
 	})
 	target, _ := url.Parse("https://agent-vault.example")
-	handler := newAdminBridgeHandler(target, transport, defaultAdminBridgeOrigin, nil, nil)
+	handler, _ := newAuthorizedAdminBridgeTestHandler(t, target, transport, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.0.0.5:54321"
 	req.Host = "127.0.0.1:19443"
@@ -147,7 +178,7 @@ func TestAdminBridgeHealthAndReadinessAreLocalAndValueSafe(t *testing.T) {
 		return nil, errors.New("must not be called")
 	})
 	target, _ := url.Parse("https://agent-vault.example")
-	handler := newAdminBridgeHandler(target, transport, defaultAdminBridgeOrigin, func() error {
+	handler, _ := newAuthorizedAdminBridgeTestHandler(t, target, transport, func() error {
 		return errors.New("SPIFFE socket /secret/path is unavailable")
 	}, nil)
 
@@ -175,12 +206,13 @@ func TestAdminBridgeUpstreamErrorDoesNotLeakTransportDetails(t *testing.T) {
 	})
 	target, _ := url.Parse("https://agent-vault.example")
 	var audit bytes.Buffer
-	handler := newAdminBridgeHandler(target, transport, defaultAdminBridgeOrigin, nil, func(event string) {
+	handler, ownerCookie := newAuthorizedAdminBridgeTestHandler(t, target, transport, nil, func(event string) {
 		audit.WriteString(event)
 	})
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Host = "127.0.0.1:19443"
+	req.AddCookie(ownerCookie)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -199,7 +231,7 @@ func TestAdminBridgeRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 		return nil, errors.New("must not be called")
 	})
 	target, _ := url.Parse("https://agent-vault.example")
-	handler := newAdminBridgeHandler(target, transport, defaultAdminBridgeOrigin, nil, nil)
+	handler, _ := newAuthorizedAdminBridgeTestHandler(t, target, transport, nil, nil)
 
 	for _, tc := range []struct {
 		name   string
@@ -225,6 +257,126 @@ func TestAdminBridgeRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("unsafe requests made %d upstream calls", calls.Load())
+	}
+}
+
+func TestAdminBridgeRequiresOneTimeOwnerCapabilityAndExpiringSession(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	gate, capability, err := newAdminBridgeCapabilityGate(func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new capability gate: %v", err)
+	}
+	var upstreamCalls atomic.Int32
+	transport := adminBridgeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		if req.Header.Get("Cookie") != "" {
+			t.Fatalf("bridge session cookie reached upstream")
+		}
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	})
+	target, _ := url.Parse("https://agent-vault.example")
+	var audit bytes.Buffer
+	handler := newAdminBridgeHandler(target, transport, defaultAdminBridgeOrigin, gate, nil, func(event string) {
+		audit.WriteString(event)
+	})
+	request := func(path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Host = "127.0.0.1:19443"
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := request("/", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing capability status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if rec := request("/?"+adminBridgeCapabilityParam+"=wrong", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid capability status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	bootstrap := request("/?"+adminBridgeCapabilityParam+"="+url.QueryEscape(capability), nil)
+	if bootstrap.Code != http.StatusSeeOther || bootstrap.Header().Get("Location") != defaultAdminBridgeOrigin+"/" {
+		t.Fatalf("bootstrap response = %d location=%q", bootstrap.Code, bootstrap.Header().Get("Location"))
+	}
+	cookies := bootstrap.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("bootstrap cookies = %d, want 1", len(cookies))
+	}
+	ownerCookie := cookies[0]
+	if ownerCookie.Name != adminBridgeSessionCookie || !ownerCookie.HttpOnly || ownerCookie.Path != "/" || ownerCookie.SameSite != http.SameSiteLaxMode || ownerCookie.MaxAge != int(adminBridgeSessionTTL.Seconds()) {
+		t.Fatalf("unsafe owner cookie: %#v", ownerCookie)
+	}
+	if rec := request("/?"+adminBridgeCapabilityParam+"="+url.QueryEscape(capability), nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed capability status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	// #nosec G124 -- negative test deliberately corrupts the otherwise hardened cookie.
+	wrongCookie := *ownerCookie
+	wrongCookie.Value = "wrong"
+	if rec := request("/v1/status", &wrongCookie); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong session status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if rec := request("/v1/status", ownerCookie); rec.Code != http.StatusNoContent {
+		t.Fatalf("authorized request status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", upstreamCalls.Load())
+	}
+	now = now.Add(adminBridgeSessionTTL + time.Second)
+	if rec := request("/v1/status", ownerCookie); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if strings.Contains(audit.String(), capability) || strings.Contains(audit.String(), ownerCookie.Value) {
+		t.Fatalf("capability material leaked to audit: %q", audit.String())
+	}
+}
+
+func TestAdminBridgeOwnerCapabilityExpiresBeforeUse(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	gate, capability, err := newAdminBridgeCapabilityGate(func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new capability gate: %v", err)
+	}
+	now = now.Add(adminBridgeCapabilityTTL + time.Second)
+	if _, _, ok, err := gate.bootstrap(capability); err != nil || ok {
+		t.Fatalf("expired capability accepted: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestValidateAdminBridgeServerIDRequiresExactConfiguredTrustDomain(t *testing.T) {
+	t.Parallel()
+
+	const serverID = "spiffe://nixfleet.stigen.ai/ns/six-city-agent-vault/sa/agent-vault"
+	id, err := validateAdminBridgeServerID(serverID, []string{"spiffe://nixfleet.stigen.ai"})
+	if err != nil || id.String() != serverID {
+		t.Fatalf("valid server ID = %q err=%v", id.String(), err)
+	}
+	for _, tc := range []struct {
+		name    string
+		id      string
+		domains []string
+	}{
+		{name: "missing ID", domains: []string{"spiffe://nixfleet.stigen.ai"}},
+		{name: "not SPIFFE", id: "https://agent-vault.example", domains: []string{"spiffe://nixfleet.stigen.ai"}},
+		{name: "unconfigured trust domain", id: serverID, domains: []string{"spiffe://other.example"}},
+		{name: "invalid configured trust domain", id: serverID, domains: []string{"https://nixfleet.stigen.ai"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := validateAdminBridgeServerID(tc.id, tc.domains); err == nil {
+				t.Fatal("invalid server identity configuration accepted")
+			}
+		})
 	}
 }
 

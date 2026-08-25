@@ -147,7 +147,8 @@ Run `agent-vault owner bridge` in a normally-zero-replica Kubernetes Deployment.
 agent-vault owner bridge \
   --config /etc/agent-vault/server.toml \
   --listen 127.0.0.1:19443 \
-  --public-origin http://127.0.0.1:19443
+  --public-origin http://127.0.0.1:19443 \
+  --server-spiffe-id spiffe://cluster.example/ns/agent-vault/sa/agent-vault
 ```
 
 Activate and reach it only through audited Kubernetes operations:
@@ -156,10 +157,11 @@ Activate and reach it only through audited Kubernetes operations:
 kubectl -n agent-vault scale deployment/agent-vault-human-admin --replicas=1
 kubectl -n agent-vault wait --for=condition=available deployment/agent-vault-human-admin --timeout=120s
 kubectl -n agent-vault port-forward deployment/agent-vault-human-admin 19443:19443
-open http://127.0.0.1:19443
+# Read bridge startup output through your audited Kubernetes access and open
+# the printed one-time URL; do not open an unqualified loopback URL.
 ```
 
-For authorization-code OAuth, register exactly `http://127.0.0.1:19443/v1/oauth/callback` with the provider. The bridge strips browser bearer/session credentials and spoofed forwarding or identity headers, authenticates upstream with its rotating SVID, and injects only the fixed loopback origin. Agent Vault accepts that origin only from a SPIFFE-authenticated instance owner, stores the exact callback with the OAuth state, and reuses it for token exchange. Arbitrary origins, extra paths, userinfo, queries, fragments, implicit ports, and non-loopback addresses fail closed.
+For authorization-code OAuth, register exactly `http://127.0.0.1:19443/v1/oauth/callback` with the provider. The one-time URL expires after 10 minutes and can be consumed once. It establishes an HttpOnly, host-only 30-minute cookie that is accepted only by this bridge process and stripped before proxying; `SameSite=Lax` permits the provider's top-level OAuth callback while exact Host/Origin checks reject cross-origin API requests. The bridge authenticates upstream with its rotating SVID and authorizes only the exact `--server-spiffe-id`, not every workload in the trust domain. Agent Vault accepts the fixed loopback origin only from a SPIFFE-authenticated instance owner, stores the exact callback with the OAuth state, and reuses it for token exchange. Arbitrary origins, extra paths, userinfo, queries, fragments, implicit ports, non-loopback addresses, replayed capabilities, and expired bridge sessions fail closed.
 
 Scale the Deployment back to zero immediately after the management window and verify no pod remains:
 
