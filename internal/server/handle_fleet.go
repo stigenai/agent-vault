@@ -110,6 +110,14 @@ func (s *Server) appendVaultFleetState(ctx context.Context, resources *[]fleetst
 		return fmt.Errorf("decoding broker config for vault %q: %w", vault.Name, err)
 	}
 	for _, service := range services {
+		if err := broker.NormalizePort(&service); err != nil {
+			return fmt.Errorf(
+				"normalizing broker service %q for vault %q: %w",
+				service.Name,
+				vault.Name,
+				err,
+			)
+		}
 		if err := appendFleetResource(resources, ownership,
 			store.ManagedResourceKey{Kind: store.ManagedResourceService, ScopeID: vault.ID, ResourceID: service.Name},
 			service.Name, vault.Name, fleetstate.RedactService(service)); err != nil {
