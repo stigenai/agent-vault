@@ -80,10 +80,15 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, fmt.Sprintf("Vault %q not found", req.Vault))
 		return
 	}
-	if _, err := s.requireVaultMember(w, r, ns.ID); err != nil {
+	actor, err := s.requireVaultMember(w, r, ns.ID)
+	if err != nil {
 		return
 	}
 	if !s.assertBuiltinCredentialStore(w, ctx, ns.ID, ns.Name) {
+		return
+	}
+	redirectURI, ok := s.oauthConnectRedirectURI(w, r, actor)
+	if !ok {
 		return
 	}
 
@@ -118,17 +123,17 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.SetCredentialOAuth(ctx, &store.CredentialOAuth{
-		VaultID:          ns.ID,
-		CredentialKey:    req.Key,
-		AuthorizationURL: req.AuthorizationURL,
-		TokenURL:         req.TokenURL,
-		ClientID:         req.ClientID,
-		ClientSecretCT:   clientSecretCT,
+		VaultID:           ns.ID,
+		CredentialKey:     req.Key,
+		AuthorizationURL:  req.AuthorizationURL,
+		TokenURL:          req.TokenURL,
+		ClientID:          req.ClientID,
+		ClientSecretCT:    clientSecretCT,
 		ClientSecretNonce: clientSecretNonce,
-		Scopes:           req.Scopes,
-		ScopeSeparator:   scopeSep,
-		DisablePKCE:      req.DisablePKCE,
-		TokenAuthMethod:  tokenAuthMethod,
+		Scopes:            req.Scopes,
+		ScopeSeparator:    scopeSep,
+		DisablePKCE:       req.DisablePKCE,
+		TokenAuthMethod:   tokenAuthMethod,
 	}); err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to save OAuth configuration")
 		return
@@ -152,7 +157,7 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 		CodeVerifier:  codeVerifier,
 		VaultID:       ns.ID,
 		CredentialKey: req.Key,
-		RedirectURL:   "",
+		RedirectURL:   redirectURI,
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(oauthStateTTL),
 	}); err != nil {
@@ -160,7 +165,6 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURI := s.baseURL + "/v1/oauth/callback"
 	authURL := oauth.BuildAuthorizationURL(
 		req.AuthorizationURL, req.ClientID, redirectURI,
 		stateRaw, codeChallenge, req.Scopes, scopeSep, req.DisablePKCE,
@@ -219,7 +223,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		clientSecret = string(cs)
 	}
 
-	redirectURI := s.baseURL + "/v1/oauth/callback"
+	redirectURI := s.oauthStateRedirectURI(st)
 	tok, err := oauth.Exchange(ctx, oauth.ExchangeConfig{
 		TokenURL:        oauthCfg.TokenURL,
 		ClientID:        oauthCfg.ClientID,
@@ -540,7 +544,13 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) redirectOAuthComplete(w http.ResponseWriter, r *http.Request, vault, key, status, message string) {
-	u := s.baseURL + "/oauth/complete?status=" + url.QueryEscape(status)
+	baseURL := s.baseURL
+	if values := r.Header.Values(oauth.LoopbackRedirectOriginHeader); len(values) == 1 {
+		if _, err := oauth.LoopbackCallbackURL(values[0]); err == nil {
+			baseURL = values[0]
+		}
+	}
+	u := baseURL + "/oauth/complete?status=" + url.QueryEscape(status)
 	if vault != "" {
 		u += "&vault=" + url.QueryEscape(vault)
 	}
@@ -550,9 +560,44 @@ func (s *Server) redirectOAuthComplete(w http.ResponseWriter, r *http.Request, v
 	if message != "" {
 		u += "&message=" + url.QueryEscape(message)
 	}
+	// #nosec G710 -- baseURL is either server configuration or a strict,
+	// explicit-port HTTP loopback origin validated by LoopbackCallbackURL.
 	http.Redirect(w, r, u, http.StatusFound)
 }
 
+// oauthConnectRedirectURI accepts a browser loopback redirect only when the
+// request arrived over mTLS from a SPIFFE-authenticated instance owner. The
+// admin bridge overwrites the header, and the server still performs this
+// independent authorization so a spoofed direct request fails closed.
+func (s *Server) oauthConnectRedirectURI(w http.ResponseWriter, r *http.Request, actor *Actor) (string, bool) {
+	values := r.Header.Values(oauth.LoopbackRedirectOriginHeader)
+	if len(values) == 0 {
+		return s.baseURL + "/v1/oauth/callback", true
+	}
+	if len(values) != 1 {
+		jsonError(w, http.StatusBadRequest, "Exactly one OAuth redirect origin is required")
+		return "", false
+	}
+	if s.authMode != "spiffe" || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || actor == nil || actor.Agent == nil || !actor.IsOwner() {
+		jsonError(w, http.StatusForbidden, "SPIFFE owner identity required for loopback OAuth")
+		return "", false
+	}
+	callback, err := oauth.LoopbackCallbackURL(values[0])
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "OAuth redirect origin must be an explicit-port HTTP loopback origin")
+		return "", false
+	}
+	return callback, true
+}
+
+func (s *Server) oauthStateRedirectURI(state *store.CredentialOAuthState) string {
+	if state != nil {
+		if _, err := oauth.LoopbackOriginFromCallbackURL(state.RedirectURL); err == nil {
+			return state.RedirectURL
+		}
+	}
+	return s.baseURL + "/v1/oauth/callback"
+}
 
 func isValidHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)

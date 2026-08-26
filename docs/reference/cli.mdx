@@ -985,6 +985,29 @@ description: "Complete reference for all Agent Vault CLI commands."
   </Accordion>
 </AccordionGroup>
 
+## Owner — SPIFFE human-admin bridge
+
+<AccordionGroup>
+
+  <Accordion title="agent-vault owner bridge">
+    ```bash
+    agent-vault owner bridge [flags]
+    ```
+
+    Run a loopback-only browser bridge that authenticates to a SPIFFE-only Agent Vault with a rotating X.509-SVID. This command is intended for a normally-zero-replica Kubernetes Deployment reached only with `kubectl port-forward`; it does not create or persist a bearer session.
+
+    | Flag | Default | Description |
+    |------|---------|-------------|
+    | `--config` | `/etc/agent-vault/server.toml` | Versioned TOML containing the public `[client]` configuration |
+    | `--listen` | `127.0.0.1:19443` | Exact loopback address inside the bridge pod |
+    | `--public-origin` | `http://127.0.0.1:19443` | Exact loopback browser origin and OAuth callback origin |
+    | `--server-spiffe-id` | | Exact Agent Vault server SPIFFE ID required for upstream mTLS (required) |
+
+    The command prints a one-time admin URL. Its capability expires after 10 minutes and can be consumed once; successful consumption establishes an HttpOnly, host-only 30-minute bridge cookie. The cookie is never forwarded upstream. The command refuses a non-loopback listener, a non-HTTP or non-loopback public origin, missing explicit ports, non-HTTPS Agent Vault targets, a server SPIFFE ID outside `client.trust_domains`, and configurations without `client.workload_api`. See [SPIFFE-only human administration](/self-hosting/spiffe-migration#human-administration-after-the-switch) for the Kubernetes security boundary and OAuth callback registration.
+  </Accordion>
+
+</AccordionGroup>
+
 ## Owner — users
 
 <AccordionGroup>
