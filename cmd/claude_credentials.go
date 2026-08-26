@@ -32,6 +32,8 @@ func populateClaudeCredentialsFromKeychain(hostAgentDir string) {
 		return
 	}
 	credPath := filepath.Join(hostAgentDir, ".credentials.json")
+	// #nosec G703 -- hostAgentDir is the caller-selected local agent directory;
+	// this fixed child path is the credential file the caller asked us to share.
 	if _, err := os.Stat(credPath); err == nil {
 		return
 	}
@@ -43,5 +45,6 @@ func populateClaudeCredentialsFromKeychain(hostAgentDir string) {
 	if token == "" {
 		return
 	}
+	// #nosec G703 -- see the hostAgentDir trust-boundary rationale above.
 	_ = os.WriteFile(credPath, []byte(token), 0o600)
 }
