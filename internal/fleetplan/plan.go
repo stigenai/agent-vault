@@ -20,9 +20,17 @@ import (
 const SchemaVersion = 1
 
 type Options struct {
-	Adopt            bool `json:"adopt"`
-	Prune            bool `json:"prune"`
-	PruneCredentials bool `json:"prune_credentials"`
+	Adopt            bool                    `json:"adopt"`
+	Prune            bool                    `json:"prune"`
+	PruneCredentials bool                    `json:"prune_credentials"`
+	RefreshImports   []ImportedCredentialRef `json:"refresh_imports,omitempty"`
+}
+
+// ImportedCredentialRef identifies one desired one-time import whose encrypted
+// value should be replaced from its configured import source during this plan.
+type ImportedCredentialRef struct {
+	Vault string `json:"vault"`
+	Name  string `json:"name"`
 }
 
 type Plan struct {
@@ -127,6 +135,10 @@ func Build(desired *fleetconfig.Manifest, current fleetstate.State, options Opti
 		return nil, err
 	}
 	desiredByID, err := desiredResources(desired)
+	if err != nil {
+		return nil, err
+	}
+	options, err = normalizeRefreshImports(options, desiredByID)
 	if err != nil {
 		return nil, err
 	}
@@ -257,18 +269,64 @@ func operationFor(id identity, want desiredResource, wanted bool, have fleetstat
 			return op
 		}
 		if have.ETag == want.state.ETag {
-			op.Action, op.Reason = ActionAdopt, "adopt_unchanged"
+			if refreshImportRequested(options, id) {
+				op.Action, op.Reason = ActionAdoptUpdate, "adopt_and_refresh_import"
+			} else {
+				op.Action, op.Reason = ActionAdopt, "adopt_unchanged"
+			}
 		} else {
 			op.Action, op.Reason = ActionAdoptUpdate, "adopt_and_update"
 		}
 		return op
 	}
 	if have.ETag == want.state.ETag {
-		op.Action, op.Reason = ActionNoop, "already_converged"
+		if refreshImportRequested(options, id) {
+			op.Action, op.Reason = ActionUpdate, "import_refresh_requested"
+		} else {
+			op.Action, op.Reason = ActionNoop, "already_converged"
+		}
 		return op
 	}
 	op.Action, op.Reason = ActionUpdate, "spec_changed"
 	return op
+}
+
+func normalizeRefreshImports(options Options, desired map[identity]desiredResource) (Options, error) {
+	if len(options.RefreshImports) == 0 {
+		return options, nil
+	}
+	options.RefreshImports = append([]ImportedCredentialRef(nil), options.RefreshImports...)
+	sort.Slice(options.RefreshImports, func(i, j int) bool {
+		if options.RefreshImports[i].Vault != options.RefreshImports[j].Vault {
+			return options.RefreshImports[i].Vault < options.RefreshImports[j].Vault
+		}
+		return options.RefreshImports[i].Name < options.RefreshImports[j].Name
+	})
+	for i, ref := range options.RefreshImports {
+		if !portableIdentity.MatchString(ref.Vault) || !portableIdentity.MatchString(ref.Name) {
+			return Options{}, errors.New("refresh import selector is invalid")
+		}
+		if i > 0 && ref == options.RefreshImports[i-1] {
+			return Options{}, fmt.Errorf("refresh import selector %q/%q is duplicated", ref.Vault, ref.Name)
+		}
+		resource, ok := desired[identity{kind: store.ManagedResourceCredential, vault: ref.Vault, name: ref.Name}]
+		if !ok || resource.details.Credential == nil || resource.details.Credential.Mode != "imported" {
+			return Options{}, fmt.Errorf("refresh import selector %q/%q is not a desired imported credential", ref.Vault, ref.Name)
+		}
+	}
+	return options, nil
+}
+
+func refreshImportRequested(options Options, id identity) bool {
+	if id.kind != store.ManagedResourceCredential {
+		return false
+	}
+	target := ImportedCredentialRef{Vault: id.vault, Name: id.name}
+	index := sort.Search(len(options.RefreshImports), func(i int) bool {
+		ref := options.RefreshImports[i]
+		return ref.Vault > target.Vault || (ref.Vault == target.Vault && ref.Name >= target.Name)
+	})
+	return index < len(options.RefreshImports) && options.RefreshImports[index] == target
 }
 
 func validateCurrent(current fleetstate.State) (map[identity]fleetstate.Resource, error) {

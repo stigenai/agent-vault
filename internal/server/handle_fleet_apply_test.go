@@ -219,6 +219,81 @@ func TestFleetApplyImportsEncryptedCredentialWithoutLiveSource(t *testing.T) {
 	}
 }
 
+func TestFleetApplyRefreshesSelectedImportedCredential(t *testing.T) {
+	srv, ms, token := setupFleetApplyTest(t)
+	manifest := fleetApplyManifest()
+	manifest.Vaults[0].Credentials = nil
+	manifest.Vaults[0].Services = nil
+	manifest.Vaults[0].Imports = []fleetconfig.Import{{Name: "GITHUB_TOKEN", From: "env://GITHUB_TOKEN"}}
+
+	_, initialDigest := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	initialValue := []byte("initial-import-value")
+	applyTestFleetPlanWithImports(t, srv, token, manifest, initialDigest, []fleetResolvedImport{{
+		Vault: "fleet-vault", Name: "GITHUB_TOKEN", Value: initialValue,
+	}}, http.StatusOK)
+
+	credentialKey := store.ManagedResourceKey{
+		Kind: store.ManagedResourceCredential, ScopeID: "ns-fleet-vault", ResourceID: "GITHUB_TOKEN",
+	}
+	before := ms.managedResources[credentialKey]
+	refreshOptions := fleetplan.Options{RefreshImports: []fleetplan.ImportedCredentialRef{{
+		Vault: "fleet-vault", Name: "GITHUB_TOKEN",
+	}}}
+	refreshPlan, refreshDigest := buildTestFleetPlan(t, srv, manifest, refreshOptions)
+	if refreshPlan.Summary.Update != 1 || refreshPlan.Summary.Noop != 3 {
+		t.Fatalf("refresh plan = %#v", refreshPlan)
+	}
+
+	applyTestFleetPlanWithOptionsAndImports(t, srv, token, manifest, refreshOptions, refreshDigest, nil, http.StatusUnprocessableEntity)
+	if got := ms.managedResources[credentialKey]; got.Revision != before.Revision {
+		t.Fatalf("missing import payload mutated ownership: before=%#v after=%#v", before, got)
+	}
+	applyTestFleetPlanWithOptionsAndImports(t, srv, token, manifest, refreshOptions, refreshDigest,
+		[]fleetResolvedImport{
+			{Vault: "fleet-vault", Name: "GITHUB_TOKEN", Value: []byte("candidate-rotation")},
+			{Vault: "fleet-vault", Name: "UNEXPECTED_TOKEN", Value: []byte("unexpected-value")},
+		}, http.StatusUnprocessableEntity)
+	if got := ms.managedResources[credentialKey]; got.Revision != before.Revision {
+		t.Fatalf("unexpected import payload mutated ownership: before=%#v after=%#v", before, got)
+	}
+
+	rotatedValue := []byte("rotated-import-value-that-must-not-leak")
+	response := applyTestFleetPlanWithOptionsAndImports(t, srv, token, manifest, refreshOptions, refreshDigest,
+		[]fleetResolvedImport{{Vault: "fleet-vault", Name: "GITHUB_TOKEN", Value: rotatedValue}}, http.StatusOK)
+	if len(response.Applied) != 1 || response.Applied[0].Action != fleetplan.ActionUpdate {
+		t.Fatalf("refresh response = %#v", response)
+	}
+	encodedResponse, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedResponse), string(rotatedValue)) {
+		t.Fatalf("refresh response leaked imported value: %s", encodedResponse)
+	}
+
+	after := ms.managedResources[credentialKey]
+	if after.Manager != before.Manager || after.Revision != before.Revision+1 {
+		t.Fatalf("refresh changed ownership metadata incorrectly: before=%#v after=%#v", before, after)
+	}
+	credential := ms.credentials["ns-fleet-vault:GITHUB_TOKEN"]
+	plaintext, err := vaultcrypto.Decrypt(credential.Ciphertext, credential.Nonce, srv.encKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultcrypto.WipeBytes(plaintext)
+	if string(plaintext) != string(rotatedValue) {
+		t.Fatal("refreshed encrypted credential does not contain rotated value")
+	}
+	if _, exists := ms.credentialSources["ns-fleet-vault:GITHUB_TOKEN"]; exists {
+		t.Fatal("refreshed one-time import retained a live source")
+	}
+
+	converged, _ := buildTestFleetPlan(t, srv, manifest, fleetplan.Options{})
+	if converged.Summary.Noop != 4 {
+		t.Fatalf("default plan after refresh is not idempotent: %#v", converged)
+	}
+}
+
 func TestFleetApplyImportUpdateDetachesExistingLiveSource(t *testing.T) {
 	srv, ms, token := setupFleetApplyTest(t)
 	manifest := fleetApplyManifest()

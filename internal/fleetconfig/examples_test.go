@@ -82,7 +82,7 @@ func TestKubernetesFleetDesiredStateExamplesValidate(t *testing.T) {
 	for _, required := range []string{
 		"schema_version", "manager", "spiffe_id", "vaults.grants", "vaults.services",
 		"vaults.credentials", "vaults.imports", "refresh_interval", "max_staleness",
-		"--plan-sha256", "--adopt", "--prune", "--prune-credentials", "rollback",
+		"--plan-sha256", "--adopt", "--prune", "--prune-credentials", "--refresh-import", "rollback",
 	} {
 		if !strings.Contains(doc, required) {
 			t.Errorf("fleet schema reference omits %q", required)
