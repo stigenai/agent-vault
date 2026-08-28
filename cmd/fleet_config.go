@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	vaultcrypto "github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/fleetconfig"
@@ -185,6 +186,11 @@ func buildFleetCommandInput(cmd *cobra.Command) (*fleetCommandInput, error) {
 	options.Adopt, _ = cmd.Flags().GetBool("adopt")
 	options.Prune, _ = cmd.Flags().GetBool("prune")
 	options.PruneCredentials, _ = cmd.Flags().GetBool("prune-credentials")
+	options.RefreshImports, err = fleetImportRefreshSelectors(cmd)
+	if err != nil {
+		_ = importProviders.Close()
+		return nil, err
+	}
 	plan, err := fleetplan.Build(manifest, current, options)
 	if err != nil {
 		_ = importProviders.Close()
@@ -212,6 +218,20 @@ func addFleetConfigFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("adopt", false, "adopt matching unmanaged resources")
 	cmd.Flags().Bool("prune", false, "delete resources no longer in the manifest")
 	cmd.Flags().Bool("prune-credentials", false, "allow credential deletion when pruning")
+	cmd.Flags().StringArray("refresh-import", nil, "refresh an imported credential from its configured source (repeatable VAULT/CREDENTIAL)")
+}
+
+func fleetImportRefreshSelectors(cmd *cobra.Command) ([]fleetplan.ImportedCredentialRef, error) {
+	values, _ := cmd.Flags().GetStringArray("refresh-import")
+	selectors := make([]fleetplan.ImportedCredentialRef, 0, len(values))
+	for _, value := range values {
+		vault, name, ok := strings.Cut(value, "/")
+		if !ok || vault == "" || name == "" {
+			return nil, errors.New("--refresh-import must use VAULT/CREDENTIAL")
+		}
+		selectors = append(selectors, fleetplan.ImportedCredentialRef{Vault: vault, Name: name})
+	}
+	return selectors, nil
 }
 
 func init() {

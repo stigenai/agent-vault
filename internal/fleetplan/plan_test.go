@@ -281,6 +281,89 @@ func TestImportedCredentialIsIdempotentWithoutRevealingOrReapplyingSource(t *tes
 	}
 }
 
+func TestExplicitImportRefreshUpdatesOnlySelectedCredential(t *testing.T) {
+	desired := testManifest()
+	desired.Vaults[0].Imports = append(desired.Vaults[0].Imports,
+		fleetconfig.Import{Name: "SECOND_LOCAL_TOKEN", From: "file:///another/private/token-path"})
+	current := currentFromDesired(t, desired, desired.Manager)
+
+	plan, err := Build(desired, current, Options{RefreshImports: []ImportedCredentialRef{{
+		Vault: "github-automation", Name: "LOCAL_TOKEN",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary.Update != 1 || plan.Summary.Noop != len(plan.Operations)-1 {
+		t.Fatalf("refresh plan summary = %#v", plan.Summary)
+	}
+	selected := findOperation(t, plan, store.ManagedResourceCredential, "github-automation", "LOCAL_TOKEN")
+	if selected.Action != ActionUpdate || selected.Reason != "import_refresh_requested" {
+		t.Fatalf("selected import operation = %#v", selected)
+	}
+	unselected := findOperation(t, plan, store.ManagedResourceCredential, "github-automation", "SECOND_LOCAL_TOKEN")
+	if unselected.Action != ActionNoop || unselected.Reason != "already_converged" {
+		t.Fatalf("unselected import operation = %#v", unselected)
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secretSource := range []string{"/very/private/token-path", "/another/private/token-path"} {
+		if strings.Contains(string(encoded), secretSource) {
+			t.Fatalf("refresh plan leaked import source %q: %s", secretSource, encoded)
+		}
+	}
+}
+
+func TestImportRefreshSelectorsMustTargetUniqueDesiredImports(t *testing.T) {
+	desired := testManifest()
+	current := currentFromDesired(t, desired, desired.Manager)
+	tests := map[string][]ImportedCredentialRef{
+		"reference credential": {{Vault: "github-automation", Name: "GITHUB_TOKEN"}},
+		"missing credential":   {{Vault: "github-automation", Name: "MISSING_TOKEN"}},
+		"duplicate import": {
+			{Vault: "github-automation", Name: "LOCAL_TOKEN"},
+			{Vault: "github-automation", Name: "LOCAL_TOKEN"},
+		},
+	}
+	for name, selectors := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Build(desired, current, Options{RefreshImports: selectors}); err == nil {
+				t.Fatal("invalid refresh selector was accepted")
+			}
+		})
+	}
+}
+
+func TestImportRefreshSelectorOrderDoesNotChangePlanDigest(t *testing.T) {
+	desired := testManifest()
+	desired.Vaults[0].Imports = append(desired.Vaults[0].Imports,
+		fleetconfig.Import{Name: "SECOND_LOCAL_TOKEN", From: "file:///another/private/token-path"})
+	current := currentFromDesired(t, desired, desired.Manager)
+	first := ImportedCredentialRef{Vault: "github-automation", Name: "LOCAL_TOKEN"}
+	second := ImportedCredentialRef{Vault: "github-automation", Name: "SECOND_LOCAL_TOKEN"}
+
+	reversed, err := Build(desired, current, Options{RefreshImports: []ImportedCredentialRef{second, first}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := Build(desired, current, Options{RefreshImports: []ImportedCredentialRef{first, second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversedDigest, err := Digest(reversed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orderedDigest, err := Digest(ordered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversedDigest != orderedDigest || !reflect.DeepEqual(reversed.Options.RefreshImports, []ImportedCredentialRef{first, second}) {
+		t.Fatalf("refresh selector order changed plan: reversed=%#v ordered=%#v", reversed, ordered)
+	}
+}
+
 func currentFromDesired(t *testing.T, desired *fleetconfig.Manifest, manager string) fleetstate.State {
 	t.Helper()
 	resources, err := desiredResources(desired)

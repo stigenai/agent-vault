@@ -263,6 +263,18 @@ kubectl -n secret-source get secret bootstrap-token \
 
 An import is one-time and becomes no-op after creation. Changing the upstream value alone does not trigger an update.
 
+To rotate a deliberately imported value without deleting the credential, select that exact import in both the reviewed plan and apply:
+
+```bash
+agent-vault config plan -f imports.toml \
+  --refresh-import github-automation/GITHUB_INSTALLATION_TOKEN
+agent-vault config apply -f imports.toml \
+  --refresh-import github-automation/GITHUB_INSTALLATION_TOKEN \
+  --plan-sha256 "$PLAN_SHA256"
+```
+
+`--refresh-import` is repeatable and accepts only a desired `vaults.imports` credential in `VAULT/CREDENTIAL` form. Each selected converged import is an explicit `update` with reason `import_refresh_requested`; unselected imports remain no-ops. The plan and command line contain only the vault and credential names. The value is resolved after plan approval, transported in the authenticated apply body, wiped, and encrypted exactly as on initial import.
+
 ## GitOps rollout and rollback
 
 Recommended pull-request flow:

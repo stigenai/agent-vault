@@ -161,6 +161,30 @@ from = "env://FLEET_IMPORTED_TOKEN"
 	}
 }
 
+func TestFleetImportRefreshSelectors(t *testing.T) {
+	cmd := newFleetTestCommand()
+	for _, value := range []string{"six-city-reviewer/GITHUB_INSTALLATION_TOKEN", "six-city-planner/GITHUB_INSTALLATION_TOKEN"} {
+		if err := cmd.Flags().Set("refresh-import", value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selectors, err := fleetImportRefreshSelectors(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selectors) != 2 || selectors[0].Vault != "six-city-reviewer" || selectors[1].Vault != "six-city-planner" {
+		t.Fatalf("refresh selectors = %#v", selectors)
+	}
+
+	invalid := newFleetTestCommand()
+	if err := invalid.Flags().Set("refresh-import", "missing-separator"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fleetImportRefreshSelectors(invalid); err == nil || !strings.Contains(err.Error(), "VAULT/CREDENTIAL") {
+		t.Fatalf("invalid selector error = %v", err)
+	}
+}
+
 func newFleetTestCommand() *cobra.Command {
 	cmd := &cobra.Command{}
 	addFleetConfigFlags(cmd)
