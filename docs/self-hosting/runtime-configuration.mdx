@@ -174,6 +174,21 @@ The relay's `[relay]` table accepts `listen_address`, `remote_address`, `listene
 
 `AGENT_VAULT_RELAY_LISTEN`, `AGENT_VAULT_RELAY_REMOTE`, `AGENT_VAULT_RELAY_LISTENER_MODE`, and `AGENT_VAULT_RELAY_METRICS_ADDRESS` override those TOML fields for compatibility. Fleet deployments should keep the topology in TOML.
 
+### Substrate egress credential provider
+
+Agent Vault can serve the [Substrate](https://github.com/agent-substrate/substrate) egress gateway's `CredentialProvider.FetchSecret` gRPC API, so the gateway fills an actor's request header from a vault credential and the secret never enters the actor. The `[substrate_provider]` table is TOML-only and disabled unless `listen_address` is set:
+
+```toml
+[substrate_provider]
+listen_address = ":50051"
+server_cred_bundle = "/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+client_ca_file = "/run/podidentity.podcert.ate.dev/trust-bundle.pem"
+# gateway_identity = "spiffe://cluster.local/ns/ate-system/sa/atenet-egress"  # default
+# actor_trust_domain = "substrate-actor.local"                               # default
+```
+
+The listener requires TLS 1.3 mTLS: the caller's certificate must chain to `client_ca_file` and carry `gateway_identity` as a URI SAN; both PEM files are re-read per handshake so projected certificates rotate without a restart. Credential URIs take the form `ate-secret://agent-vault/<vault>/<credential-key>`. A request is served only when `actor_spiffe_id` is in `actor_trust_domain` and equals the SPIFFE ID of an active agent that holds any role on `<vault>`; otherwise it returns `PermissionDenied` (403 at the gateway, also for unknown vaults). A missing key returns `NotFound` (403); store outages return `Unavailable` (retryable 503). Static and already-connected OAuth credentials are served; OAuth refresh and dynamic leases are not. Point the gateway at it with `--credential-provider-name ate-secret://agent-vault --credential-provider-address <service>.<namespace>.svc:50051`.
+
 ## Kubernetes fleet example
 
 The repository includes a validated [server TOML](https://github.com/stigenai/agent-vault/blob/main/examples/kubernetes/fleet/server.toml), [Deployment](https://github.com/stigenai/agent-vault/blob/main/examples/kubernetes/fleet/deployment.yaml), and Kustomize file that generates the ConfigMap directly from that TOML. The example mounts a separate Secret volume, connects every replica to central PostgreSQL, and runs in the foreground as Kubernetes expects.

@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"net"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
@@ -76,6 +78,8 @@ type Server struct {
 	baseURL           string              // externally-reachable base URL (e.g. "https://sb.example.com")
 	skillCLI          []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
 	mitm              *mitm.Proxy         // transparent MITM proxy; nil only when --mitm-port 0
+	substrateAddr     string              // Substrate credential provider listen address
+	substrateGRPC     *grpc.Server        // nil unless [substrate_provider] is configured
 	logger            *slog.Logger        // structured logger for per-request observability
 	rateLimit         *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
 	rateLimitBase     ratelimit.Config
@@ -127,6 +131,12 @@ func (s *Server) RateLimit() *ratelimit.Registry { return s.rateLimit }
 // is bound to this Server: Start launches it, and SIGINT/SIGTERM/Shutdown
 // stops it alongside the HTTP server.
 func (s *Server) AttachMITM(p *mitm.Proxy) { s.mitm = p }
+
+// AttachSubstrateProvider serves the Substrate CredentialProvider gRPC API on
+// addr. It is stopped before the DEK is wiped. Must be called before Start.
+func (s *Server) AttachSubstrateProvider(addr string, gs *grpc.Server) {
+	s.substrateAddr, s.substrateGRPC = addr, gs
+}
 
 // AttachInfisical registers the Infisical client. Must be called before Start.
 func (s *Server) AttachInfisical(c *infisical.Client) { s.infisicalClient = c }
@@ -1179,6 +1189,15 @@ func (s *Server) Start() error {
 		return fmt.Errorf("listen %s: %w", s.httpServer.Addr, err)
 	}
 
+	var substrateLn net.Listener
+	if s.substrateGRPC != nil {
+		// Explicitly configured, so a bind failure is fatal (unlike MITM).
+		if substrateLn, err = net.Listen("tcp", s.substrateAddr); err != nil {
+			_ = httpLn.Close()
+			return fmt.Errorf("listen substrate provider %s: %w", s.substrateAddr, err)
+		}
+	}
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -1270,6 +1289,15 @@ func (s *Server) Start() error {
 		}()
 	}
 
+	if substrateLn != nil {
+		go func() {
+			fmt.Printf("Agent Vault Substrate credential provider listening on %s\n", substrateLn.Addr())
+			if err := s.substrateGRPC.Serve(substrateLn); err != nil {
+				errCh <- fmt.Errorf("substrate provider: %w", err)
+			}
+		}()
+	}
+
 	if err := pidfile.WriteIfFree(os.Getpid()); err != nil {
 		if errors.Is(err, pidfile.ErrAlreadyRunning) {
 			s.logger.Warn("pidfile owned by another process; not claiming or removing it")
@@ -1298,6 +1326,15 @@ func (s *Server) Start() error {
 	}
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		shutdownErr = fmt.Errorf("server shutdown: %w", err)
+	}
+	if s.substrateGRPC != nil {
+		done := make(chan struct{})
+		go func() { s.substrateGRPC.GracefulStop(); close(done) }()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			s.substrateGRPC.Stop()
+		}
 	}
 
 	// Stop background workers (syncer + touch-cache pruner) and wait for the

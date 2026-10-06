@@ -30,6 +30,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/server"
 	"github.com/Infisical/agent-vault/internal/session"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/substrate"
 	"github.com/Infisical/agent-vault/internal/telemetry"
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
 	"github.com/spf13/cobra"
@@ -334,8 +335,34 @@ func attachServerExtensions(srv *server.Server, cfg runtimeconfig.Runtime, maste
 	if err := attachMITMIfEnabled(srv, cfg, masterKey, db, proxyTLS); err != nil {
 		return err
 	}
+	if err := attachSubstrateProvider(srv, cfg.SubstrateProvider, masterKey, db); err != nil {
+		return err
+	}
 	infisicalClient := attachInfisicalIfConfigured(srv, logger)
 	return attachSecretProviders(srv, cfg, masterKey, db, logger, identitySource, infisicalClient)
+}
+
+// attachSubstrateProvider serves the Substrate egress CredentialProvider API
+// when [substrate_provider] listen_address is set.
+func attachSubstrateProvider(srv *server.Server, cfg runtimeconfig.SubstrateProvider, masterKey []byte, db store.Store) error {
+	if cfg.ListenAddress == "" {
+		return nil
+	}
+	gateway, actorDomain := cfg.GatewayIdentity, cfg.ActorTrustDomain
+	if gateway == "" {
+		gateway = substrate.DefaultGatewayIdentity
+	}
+	if actorDomain == "" {
+		actorDomain = substrate.DefaultActorTrustDomain
+	}
+	tlsCfg, err := substrate.ServerTLSConfig(substrate.TLSFiles{
+		ServerCredBundle: cfg.ServerCredBundle, ClientCAFile: cfg.ClientCAFile, GatewayIdentity: gateway,
+	})
+	if err != nil {
+		return fmt.Errorf("substrate_provider: %w", err)
+	}
+	srv.AttachSubstrateProvider(cfg.ListenAddress, substrate.NewGRPCServer(substrate.NewProvider(db, masterKey, actorDomain), tlsCfg))
+	return nil
 }
 
 // attachInfisicalIfConfigured wires the Infisical client when INFISICAL_URL
