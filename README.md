@@ -196,6 +196,10 @@ By default Agent Vault stores all state in a local SQLite database, which requir
 
 Migrate existing data with `agent-vault migrate-db --to postgres://...` before switching. See the [PostgreSQL guide](https://docs.agent-vault.dev/self-hosting/postgres) for deployment examples (Kubernetes, Docker Compose), architecture notes, and operational details.
 
+## Substrate egress credential provider
+
+Agent Vault can act as a [Substrate](https://github.com/agent-substrate/substrate) egress credential provider: with a `[substrate_provider]` table in the server TOML it serves `CredentialProvider.FetchSecret` over mTLS (admitting only the egress gateway's identity) for URIs `ate-secret://agent-vault/<vault>/<credential-key>`. The gateway injects the credential into the actor's HTTPS request, so the actor never holds it. Authorization is per actor: the gateway-attested `actor_spiffe_id` must be an active agent's SPIFFE ID with a grant on the vault. See [Runtime configuration](https://docs.agent-vault.dev/self-hosting/runtime-configuration#substrate-egress-credential-provider).
+
 ## SDK
 
 Agent Vault offers a TypeScript SDK in the event you'd like an orchestrator to mint a short-lived token and pass proxy config into a sandboxed agent to have it proxy requests through Agent Vault that way.

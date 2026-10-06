@@ -527,6 +527,21 @@ func applyPartial(result *Result, partial Partial, source Source, resolver Resol
 		result.Config.Telemetry.MetricsEnabled = *v
 		set("telemetry.metrics_enabled")
 	}
+	for name, pair := range map[string]struct {
+		src *string
+		dst *string
+	}{
+		"listen_address":     {partial.SubstrateProvider.ListenAddress, &result.Config.SubstrateProvider.ListenAddress},
+		"server_cred_bundle": {partial.SubstrateProvider.ServerCredBundle, &result.Config.SubstrateProvider.ServerCredBundle},
+		"client_ca_file":     {partial.SubstrateProvider.ClientCAFile, &result.Config.SubstrateProvider.ClientCAFile},
+		"gateway_identity":   {partial.SubstrateProvider.GatewayIdentity, &result.Config.SubstrateProvider.GatewayIdentity},
+		"actor_trust_domain": {partial.SubstrateProvider.ActorTrustDomain, &result.Config.SubstrateProvider.ActorTrustDomain},
+	} {
+		if pair.src != nil {
+			*pair.dst = *pair.src
+			set("substrate_provider." + name)
+		}
+	}
 	if v := partial.SecretProviders; v != nil {
 		result.Config.SecretProviders = append([]SecretProviderConfig(nil), (*v)...)
 		set("secret_providers")

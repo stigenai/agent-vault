@@ -58,6 +58,18 @@ type Runtime struct {
 	RateLimit       RateLimit
 	Telemetry       Telemetry
 	SecretProviders []SecretProviderConfig
+	// SubstrateProvider serves the Substrate egress CredentialProvider gRPC
+	// API; disabled when ListenAddress is empty. TOML-only (no env/flag);
+	// empty identities fall back to the Substrate defaults.
+	SubstrateProvider SubstrateProvider
+}
+
+type SubstrateProvider struct {
+	ListenAddress    string
+	ServerCredBundle string
+	ClientCAFile     string
+	GatewayIdentity  string
+	ActorTrustDomain string
 }
 
 type Server struct {
@@ -199,6 +211,16 @@ type Partial struct {
 	RateLimit       PartialRateLimit        `toml:"rate_limit"`
 	Telemetry       PartialTelemetry        `toml:"telemetry"`
 	SecretProviders *[]SecretProviderConfig `toml:"secret_providers"`
+	// SubstrateProvider is the [substrate_provider] table.
+	SubstrateProvider PartialSubstrateProvider `toml:"substrate_provider"`
+}
+
+type PartialSubstrateProvider struct {
+	ListenAddress    *string `toml:"listen_address"`
+	ServerCredBundle *string `toml:"server_cred_bundle"`
+	ClientCAFile     *string `toml:"client_ca_file"`
+	GatewayIdentity  *string `toml:"gateway_identity"`
+	ActorTrustDomain *string `toml:"actor_trust_domain"`
 }
 
 type PartialServer struct {
@@ -422,6 +444,9 @@ func (c Runtime) Validate() error {
 		return err
 	}
 	if err := validateAuth(c.Auth); err != nil {
+		return err
+	}
+	if err := validateSubstrateProvider(c.SubstrateProvider); err != nil {
 		return err
 	}
 	if err := validateKeyWrappers(c.Encryption); err != nil {
@@ -682,6 +707,28 @@ func validNetworkList(name string, values []string) error {
 		if _, _, err := net.ParseCIDR(value); err != nil {
 			return fmt.Errorf("%s: %q must be an IP address or CIDR", name, value)
 		}
+	}
+	return nil
+}
+
+func validateSubstrateProvider(p SubstrateProvider) error {
+	if p.ListenAddress == "" {
+		return nil
+	}
+	if _, port, err := net.SplitHostPort(p.ListenAddress); err != nil || port == "" {
+		return fmt.Errorf("substrate_provider.listen_address: must be host:port")
+	}
+	if !filepath.IsAbs(p.ServerCredBundle) {
+		return fmt.Errorf("substrate_provider.server_cred_bundle: absolute path required")
+	}
+	if !filepath.IsAbs(p.ClientCAFile) {
+		return fmt.Errorf("substrate_provider.client_ca_file: absolute path required")
+	}
+	if u, err := url.Parse(p.GatewayIdentity); p.GatewayIdentity != "" && (err != nil || u.Scheme != "spiffe" || u.Host == "") {
+		return fmt.Errorf("substrate_provider.gateway_identity: must be a spiffe:// URI")
+	}
+	if strings.ContainsAny(p.ActorTrustDomain, "/:") {
+		return fmt.Errorf("substrate_provider.actor_trust_domain: must be a bare trust domain")
 	}
 	return nil
 }
