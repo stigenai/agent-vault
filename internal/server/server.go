@@ -1332,8 +1332,8 @@ func (s *Server) Start() error {
 		go func() { s.substrateGRPC.GracefulStop(); close(done) }()
 		select {
 		case <-done:
-		case <-ctx.Done():
-			s.substrateGRPC.Stop()
+		case <-time.After(5 * time.Second):
+			s.substrateGRPC.Stop() // waits for in-flight handlers (WaitForHandlers)
 		}
 	}
 

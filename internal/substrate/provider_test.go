@@ -315,4 +315,9 @@ func TestServerTLSConfigRequiresFiles(t *testing.T) {
 	}); err == nil {
 		t.Fatal("empty client CA accepted")
 	}
+	if _, err := ServerTLSConfig(TLSFiles{
+		ServerCredBundle: writeFile(t, dir, "garbage-bundle", []byte("junk")), ClientCAFile: writeFile(t, dir, "ca-bundle", newCA(t).pem), GatewayIdentity: DefaultGatewayIdentity,
+	}); err == nil {
+		t.Fatal("unparseable server cred bundle accepted")
+	}
 }

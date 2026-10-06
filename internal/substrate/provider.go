@@ -185,6 +185,10 @@ func ServerTLSConfig(f TLSFiles) (*tls.Config, error) {
 		c, err := tls.X509KeyPair(b, b)
 		return &c, err
 	}
+	// Fail at startup, not silently on every handshake.
+	if _, err := getCert(nil); err != nil {
+		return nil, fmt.Errorf("server cred bundle: %w", err)
+	}
 	verifySAN := func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
 			return fmt.Errorf("client certificate required")
@@ -228,7 +232,9 @@ func loadPool(path string) (*x509.CertPool, error) {
 
 // NewGRPCServer returns a gRPC server serving p over tlsCfg.
 func NewGRPCServer(p *Provider, tlsCfg *tls.Config) *grpc.Server {
-	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
+	// WaitForHandlers: Stop must not return while a handler still reads the
+	// DEK the server is about to wipe.
+	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)), grpc.WaitForHandlers(true))
 	credproviderpb.RegisterCredentialProviderServer(gs, p)
 	return gs
 }
