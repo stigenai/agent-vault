@@ -118,7 +118,7 @@ func init() {
 	agentCreateCmd.Flags().StringArray("vault", nil, "vault pre-assignment (format: name:role, role defaults to proxy)")
 	agentCreateCmd.Flags().Bool("token-only", false, "output only the raw agent token (for programmatic use)")
 	agentCreateCmd.Flags().String("role", "no-access", "instance-level role for the agent (owner, member, or no-access)")
-	agentCreateCmd.Flags().String("spiffe-id", "", "exact SPIFFE ID to bind to this agent")
+	agentCreateCmd.Flags().String("spiffe-id", "", "SPIFFE ID to bind to this agent (exact, or spiffe://<domain>/actor/<atespace>/* for a Substrate atespace)")
 	agentCreateCmd.Flags().String("address", "", "Agent Vault server address (defaults to session address)")
 	topAgentCmd.AddCommand(agentCreateCmd)
 }

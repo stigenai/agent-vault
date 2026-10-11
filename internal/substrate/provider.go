@@ -5,8 +5,10 @@
 //
 // URIs are ate-secret://agent-vault/<vault>/<credential-key>. The caller must
 // be the gateway (pinned URI SAN); the actor named in the request must be an
-// active Agent Vault agent whose SPIFFE ID equals actor_spiffe_id and that
-// holds a grant (any role) on <vault>.
+// active Agent Vault agent that holds a grant (any role) on <vault>: the agent
+// whose SPIFFE ID equals actor_spiffe_id or, if none, the atespace-wide agent
+// spiffe://<domain>/actor/<atespace>/*. Substrate makes one actor per task, so
+// the wildcard avoids registering an agent per task.
 package substrate
 
 import (
@@ -103,7 +105,7 @@ func (p *Provider) FetchSecret(ctx context.Context, req *credproviderpb.FetchSec
 		return nil, errDenied
 	}
 
-	agent, err := p.store.GetAgentBySPIFFEID(ctx, actor)
+	agent, err := p.resolveAgent(ctx, actor)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			slog.WarnContext(ctx, "substrate credential denied: actor not registered", "actor", actor, "vault", ref.Vault)
@@ -111,8 +113,8 @@ func (p *Provider) FetchSecret(ctx context.Context, req *credproviderpb.FetchSec
 		}
 		return nil, status.Error(codes.Unavailable, "agent lookup failed")
 	}
-	if agent.Status != "active" || agent.RevokedAt != nil || agent.SPIFFEID != actor {
-		slog.WarnContext(ctx, "substrate credential denied: agent inactive", "actor", actor, "vault", ref.Vault)
+	if agent.Status != "active" || agent.RevokedAt != nil {
+		slog.WarnContext(ctx, "substrate credential denied: agent inactive", "actor", actor, "agent", agent.Name, "vault", ref.Vault)
 		return nil, errDenied
 	}
 
@@ -153,6 +155,51 @@ func (p *Provider) FetchSecret(ctx context.Context, req *credproviderpb.FetchSec
 	}
 	slog.InfoContext(ctx, "substrate credential resolved", "actor", actor, "agent", agent.Name, "vault", ref.Vault, "key", ref.Key)
 	return &credproviderpb.FetchSecretResponse{OpaqueBytes: plaintext}, nil
+}
+
+// resolveAgent returns the agent registered for actor, else the atespace
+// wildcard agent. An exact match always wins, even if that agent later fails
+// the active or grant checks: those deny rather than fall through to the
+// wildcard, which keeps the outcome predictable. Returns sql.ErrNoRows when
+// neither exists.
+func (p *Provider) resolveAgent(ctx context.Context, actor string) (*store.Agent, error) {
+	agent, err := p.store.GetAgentBySPIFFEID(ctx, actor)
+	if err == nil {
+		if agent.SPIFFEID != actor {
+			return nil, sql.ErrNoRows
+		}
+		return agent, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	wild, ok := p.atespaceWildcard(actor)
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	agent, err = p.store.GetAgentBySPIFFEID(ctx, wild)
+	if err != nil {
+		return nil, err
+	}
+	if agent.SPIFFEID != wild {
+		return nil, sql.ErrNoRows
+	}
+	return agent, nil
+}
+
+// atespaceWildcard maps spiffe://<trust-domain>/actor/<atespace>/<name> to
+// spiffe://<trust-domain>/actor/<atespace>/*. Any other shape has no wildcard.
+func (p *Provider) atespaceWildcard(actor string) (string, bool) {
+	prefix := "spiffe://" + p.actorTrustDomain + "/actor/"
+	rest, ok := strings.CutPrefix(actor, prefix)
+	if !ok {
+		return "", false
+	}
+	seg := strings.Split(rest, "/")
+	if len(seg) != 2 || seg[0] == "" || seg[1] == "" || seg[1] == "*" {
+		return "", false
+	}
+	return prefix + seg[0] + "/*", true
 }
 
 // TLSFiles names the projected files the provider serves mTLS with.
