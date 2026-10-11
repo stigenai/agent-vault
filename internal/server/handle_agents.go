@@ -11,7 +11,6 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/store"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 // reservedVaultNames are names that conflict with /vaults/* frontend routes.
@@ -30,26 +29,13 @@ func validVaultRole(s string) bool {
 	return s == "proxy" || s == "member" || s == "admin"
 }
 
-// validateAgentSPIFFEID accepts an exact SPIFFE ID, or the atespace wildcard
-// spiffe://<domain>/actor/<atespace>/* the Substrate credential provider
-// resolves for actors without their own agent. Real SVIDs cannot contain "*",
-// so a wildcard record never matches a presented identity.
+// validateAgentSPIFFEID allows an empty ID (unbound) or whatever
+// broker.ValidateAgentSPIFFEID accepts.
 func validateAgentSPIFFEID(raw string) error {
 	if raw == "" {
 		return nil
 	}
-	if base, ok := strings.CutSuffix(raw, "/*"); ok {
-		id, err := spiffeid.FromString(base)
-		if err != nil || id.String() != base || len(strings.Split(id.Path(), "/")) != 3 || !strings.HasPrefix(id.Path(), "/actor/") {
-			return fmt.Errorf("invalid SPIFFE ID")
-		}
-		return nil
-	}
-	id, err := spiffeid.FromString(raw)
-	if err != nil || id.String() != raw {
-		return fmt.Errorf("invalid SPIFFE ID")
-	}
-	return nil
+	return broker.ValidateAgentSPIFFEID(raw)
 }
 
 func isUniqueAgentConstraint(err error) bool {

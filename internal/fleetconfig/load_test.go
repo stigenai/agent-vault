@@ -580,3 +580,62 @@ func TestLoadFilesReadAndPathErrors(t *testing.T) {
 		t.Fatal("duplicate path accepted")
 	}
 }
+
+func TestLoadFilesAcceptsAtespaceWildcardOnlyForAgents(t *testing.T) {
+	const wildcard = "spiffe://substrate-actor.local/actor/factory/*"
+	top := writeManifest(t, "wildcard-top.toml", `
+schema_version = 1
+manager = "platform-fleet"
+
+[[agents]]
+name = "factory-tasks"
+spiffe_id = "`+wildcard+`"
+
+[[vaults]]
+name = "factory"
+
+[[vaults.grants]]
+agent = "factory-tasks"
+role = "proxy"
+`)
+	manifest, err := LoadFiles([]string{top}, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Agents) != 1 || manifest.Agents[0].SPIFFEID != wildcard || manifest.Agents[0].Role != "no-access" {
+		t.Fatalf("agents = %#v", manifest.Agents)
+	}
+
+	short := writeManifest(t, "wildcard-short.toml", strings.Replace(validManifest,
+		"spiffe://cluster.example/ns/agents/sa/pr-reviewer", wildcard, 1))
+	if _, err := LoadFiles([]string{short}, testOptions()); err != nil {
+		t.Fatalf("[[vaults.agents]] wildcard: %v", err)
+	}
+
+	bad := []string{
+		"spiffe://substrate-actor.local/actor/*",
+		"spiffe://substrate-actor.local/actor/factory/x/*",
+		"spiffe://substrate-actor.local/actor/fac*/x",
+		"spiffe://cluster.example/ns/agents/sa/*",
+		"spiffe://substrate-actor.local/actor/factory/**",
+	}
+	for i, id := range bad {
+		body := strings.Replace(validManifest, "spiffe://cluster.example/ns/agents/sa/pr-reviewer", id, 1)
+		path := writeManifest(t, "bad-wildcard-"+string(rune('a'+i))+".toml", body)
+		if _, err := LoadFiles([]string{path}, testOptions()); err == nil || !strings.Contains(err.Error(), "SPIFFE") {
+			t.Fatalf("id %q error = %v", id, err)
+		}
+	}
+
+	// Not an agent name or grant reference.
+	for field, body := range map[string]string{
+		"agent name":  strings.Replace(validManifest, `name = "pr-reviewer"`, `name = "factory/*"`, 1),
+		"manager":     strings.Replace(validManifest, `manager = "platform-fleet"`, `manager = "spiffe://substrate-actor.local/actor/factory/*"`, 1),
+		"grant agent": validManifest + "\n[[vaults.grants]]\nagent = \"" + wildcard + "\"\nrole = \"proxy\"\n",
+	} {
+		path := writeManifest(t, "wildcard-field-"+strings.ReplaceAll(field, " ", "-")+".toml", body)
+		if _, err := LoadFiles([]string{path}, testOptions()); err == nil {
+			t.Fatalf("%s: wildcard accepted", field)
+		}
+	}
+}

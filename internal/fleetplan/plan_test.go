@@ -402,3 +402,43 @@ func findOperation(t *testing.T, plan *Plan, kind, vault, name string) Operation
 	t.Fatalf("operation not found: %s/%s/%s", kind, vault, name)
 	return Operation{}
 }
+
+func TestBuildRoundTripsAtespaceWildcardAgent(t *testing.T) {
+	const wildcard = "spiffe://substrate-actor.local/actor/factory/*"
+	desired := &fleetconfig.Manifest{
+		SchemaVersion: 1, Manager: "platform-fleet",
+		Agents: []fleetconfig.Agent{{Name: "factory-tasks", SPIFFEID: wildcard, Role: "no-access"}},
+		Vaults: []fleetconfig.Vault{{
+			Name: "factory", UnmatchedHostPolicy: "passthrough",
+			Grants: []fleetconfig.Grant{{Agent: "factory-tasks", Role: "proxy"}},
+		}},
+	}
+	create, err := Build(desired, fleetstate.State{SchemaVersion: 1}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := findOperation(t, create, store.ManagedResourceAgent, "", "factory-tasks")
+	if agent.Action != ActionCreate || agent.Details.SPIFFEID != wildcard {
+		t.Fatalf("create = %#v", agent)
+	}
+
+	current := currentFromDesired(t, desired, "platform-fleet")
+	noop, err := Build(desired, current, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noop.Summary.Create+noop.Summary.Update+noop.Summary.Delete != 0 {
+		t.Fatalf("re-apply is not a no-op: %#v", noop.Summary)
+	}
+
+	moved := *desired
+	moved.Agents = []fleetconfig.Agent{{Name: "factory-tasks", SPIFFEID: "spiffe://substrate-actor.local/actor/other/*", Role: "no-access"}}
+	update, err := Build(&moved, current, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent = findOperation(t, update, store.ManagedResourceAgent, "", "factory-tasks")
+	if agent.Action != ActionUpdate {
+		t.Fatalf("update = %#v", agent)
+	}
+}

@@ -61,7 +61,7 @@ agent-vault auth migration bind-agent build-runner \
   --spiffe-id spiffe://cluster.example/ns/agents/sa/build-runner
 ```
 
-Alternatively, reconcile the same binding through reviewed fleet TOML. Never use wildcard or prefix identities. Revoke unused agents instead of inventing identities for them.
+Alternatively, reconcile the same binding through reviewed fleet TOML. Never use wildcard or prefix identities for workload bindings (the only wildcard, `spiffe://<domain>/actor/<atespace>/*`, is for Substrate actors and never matches an SVID). Revoke unused agents instead of inventing identities for them.
 
 Repeat `status` until:
 

@@ -175,7 +175,7 @@ agent = "pr-reviewer"
 role = "proxy"
 ```
 
-`spiffe_id` must be one exact canonical SPIFFE ID; prefixes and wildcards are rejected. Instance role is `owner`, `member`, or `no-access`. A grant references a declared agent and uses vault role `admin`, `member`, or `proxy`.
+`spiffe_id` must be one exact canonical SPIFFE ID, or for a Substrate atespace the wildcard `spiffe://<domain>/actor/<atespace>/*` (for example `spiffe://substrate-actor.local/actor/factory/*`, which the Substrate credential provider uses for actors with no agent of their own). Prefixes and any other wildcard are rejected, and the wildcard is accepted only on agent records. Instance role is `owner`, `member`, or `no-access`. A grant references a declared agent and uses vault role `admin`, `member`, or `proxy`.
 
 As shorthand, `[[vaults.agents]]` can declare an agent and grant together with `name`, `spiffe_id`, optional `instance_role`, and vault `role`. Loading normalizes it to the same instance agent plus vault grant model.
 
