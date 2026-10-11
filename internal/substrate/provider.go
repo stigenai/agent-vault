@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -46,6 +47,8 @@ type Store interface {
 	GetVault(ctx context.Context, name string) (*store.Vault, error)
 	GetVaultRole(ctx context.Context, actorID, vaultID string) (string, error)
 	GetCredential(ctx context.Context, vaultID, key string) (*store.Credential, error)
+	// GetCredentialSource returns sql.ErrNoRows for static credentials.
+	GetCredentialSource(ctx context.Context, vaultID, key string) (*store.CredentialSource, error)
 }
 
 // SecretRef is a parsed ate-secret://agent-vault/<vault>/<key> URI.
@@ -135,14 +138,19 @@ func (p *Provider) FetchSecret(ctx context.Context, req *credproviderpb.FetchSec
 		return nil, errDenied
 	}
 
-	// ponytail: static (and already-connected OAuth) credentials only; no
-	// refresh or dynamic leases here — reuse brokercore's resolver if needed.
+	// Static and already-connected OAuth values are served as stored; OAuth
+	// refresh and dynamic leases are not handled here. Reference-mode values
+	// are served from the refresh scheduler's cache, gated by max_staleness
+	// exactly as on the proxy path.
 	cred, err := p.store.GetCredential(ctx, vault.ID, ref.Key)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, status.Errorf(codes.NotFound, "credential %q not found in vault %q", ref.Key, ref.Vault)
 		}
 		return nil, status.Error(codes.Unavailable, "credential lookup failed")
+	}
+	if err := p.requireFreshReference(ctx, vault.ID, ref.Key); err != nil {
+		return nil, err
 	}
 	plaintext, err := crypto.Decrypt(cred.Ciphertext, cred.Nonce, p.encKey)
 	if err != nil {
@@ -153,6 +161,23 @@ func (p *Provider) FetchSecret(ctx context.Context, req *credproviderpb.FetchSec
 	}
 	slog.InfoContext(ctx, "substrate credential resolved", "actor", actor, "agent", agent.Name, "vault", ref.Vault, "key", ref.Key)
 	return &credproviderpb.FetchSecretResponse{OpaqueBytes: plaintext}, nil
+}
+
+// requireFreshReference fails a reference-mode credential whose cached value
+// has never been fetched or is older than max_staleness (retryable 503).
+func (p *Provider) requireFreshReference(ctx context.Context, vaultID, key string) error {
+	source, err := p.store.GetCredentialSource(ctx, vaultID, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return status.Error(codes.Unavailable, "credential source lookup failed")
+	}
+	if !store.CredentialSourceUsable(source, time.Now().UTC()) {
+		slog.WarnContext(ctx, "substrate credential unavailable: reference cache stale", "key", key, "health", source.Health)
+		return status.Error(codes.Unavailable, "credential reference cache is stale or unavailable")
+	}
+	return nil
 }
 
 // TLSFiles names the projected files the provider serves mTLS with.

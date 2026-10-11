@@ -133,6 +133,14 @@ type SecretProviderConfig struct {
 	Audience     string    `toml:"audience" json:"audience,omitempty"`
 	TrustDomains []string  `toml:"trust_domains" json:"trust_domains,omitempty"`
 	Token        SecretRef `toml:"token" json:"-"`
+
+	// github-app: the App's key is read from PrivateKeyProvider (another
+	// configured provider) on every mint and never stored.
+	AppID              string `toml:"app_id" json:"app_id,omitempty"`
+	InstallationID     string `toml:"installation_id" json:"installation_id,omitempty"`
+	APIURL             string `toml:"api_url" json:"api_url,omitempty"`
+	PrivateKeyProvider string `toml:"private_key_provider" json:"private_key_provider,omitempty"`
+	PrivateKeyRef      string `toml:"private_key_ref" json:"private_key_ref,omitempty"`
 }
 
 // Encryption contains compatibility key material until provider-backed DEK
@@ -536,11 +544,54 @@ func validateSecretProviders(providers []SecretProviderConfig, auth Auth) error 
 				return fmt.Errorf("%s.token: env:// or file:// reference is required", prefix)
 			}
 		case "infisical":
+		case "github-app":
+			if err := validateGitHubAppProvider(prefix, provider, providers); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("%s.kind: unsupported %q", prefix, provider.Kind)
 		}
 	}
 	return nil
+}
+
+var (
+	githubAppIDPattern          = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	githubInstallationIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
+)
+
+// validateGitHubAppProvider requires a key provider that exists and is not
+// itself github-app, so chains are exactly one hop deep and cannot cycle.
+func validateGitHubAppProvider(prefix string, provider SecretProviderConfig, all []SecretProviderConfig) error {
+	if !githubAppIDPattern.MatchString(provider.AppID) {
+		return fmt.Errorf("%s.app_id: is required (letters, digits, '.', '_', '-')", prefix)
+	}
+	if !githubInstallationIDPattern.MatchString(provider.InstallationID) {
+		return fmt.Errorf("%s.installation_id: must be a numeric installation ID", prefix)
+	}
+	if provider.APIURL != "" {
+		parsed, err := url.Parse(provider.APIURL)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+			parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("%s.api_url: must be an HTTPS URL without credentials", prefix)
+		}
+	}
+	if provider.PrivateKeyProvider == "" {
+		return fmt.Errorf("%s.private_key_provider: is required", prefix)
+	}
+	if provider.PrivateKeyRef == "" || strings.TrimSpace(provider.PrivateKeyRef) != provider.PrivateKeyRef {
+		return fmt.Errorf("%s.private_key_ref: is required", prefix)
+	}
+	for _, other := range all {
+		if other.Name != provider.PrivateKeyProvider {
+			continue
+		}
+		if other.Kind == provider.Kind {
+			return fmt.Errorf("%s.private_key_provider: %q must not be a github-app provider", prefix, other.Name)
+		}
+		return nil
+	}
+	return fmt.Errorf("%s.private_key_provider: %q is not a configured secret provider", prefix, provider.PrivateKeyProvider)
 }
 
 func validSecretProviderAddress(name, raw string) error {

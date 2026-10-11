@@ -351,6 +351,7 @@ const (
 	CredentialSourceOpenBaoKV2        = "openbao-kv-v2"
 	CredentialSourceOnePassword       = "onepassword-connect"
 	CredentialSourceInfisical         = "infisical"
+	CredentialSourceGitHubApp         = "github-app"
 
 	CredentialSourceHealthPending = "pending"
 	CredentialSourceHealthOK      = "ok"

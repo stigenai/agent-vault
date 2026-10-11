@@ -361,7 +361,11 @@ func attachSubstrateProvider(srv *server.Server, cfg runtimeconfig.SubstrateProv
 	if err != nil {
 		return fmt.Errorf("substrate_provider: %w", err)
 	}
-	srv.AttachSubstrateProvider(cfg.ListenAddress, substrate.NewGRPCServer(substrate.NewProvider(db, masterKey, actorDomain), tlsCfg))
+	substrateStore, ok := db.(substrate.Store)
+	if !ok {
+		return fmt.Errorf("substrate_provider: store does not support credential sources")
+	}
+	srv.AttachSubstrateProvider(cfg.ListenAddress, substrate.NewGRPCServer(substrate.NewProvider(substrateStore, masterKey, actorDomain), tlsCfg))
 	return nil
 }
 
