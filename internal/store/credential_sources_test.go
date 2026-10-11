@@ -204,3 +204,27 @@ func TestCredentialSourceMigrationBackfillsExistingExternalVault(t *testing.T) {
 		t.Fatalf("backfill lost encrypted cache = %#v, %v", credential, err)
 	}
 }
+
+func TestCredentialSourceAcceptsGitHubApp(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	vault, err := s.CreateVault(ctx, "gh-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetCredential(ctx, vault.ID, "GITHUB", []byte("ct"), []byte("nonce")); err != nil {
+		t.Fatal(err)
+	}
+	source, err := s.SetCredentialSource(ctx, CredentialSource{
+		VaultID: vault.ID, CredentialKey: "GITHUB", Mode: CredentialSourceModeReference,
+		Kind: CredentialSourceGitHubApp, ProviderName: "axel", Reference: "token",
+		RefreshIntervalSeconds: 300, MaxStalenessSeconds: 600, Health: CredentialSourceHealthPending,
+	})
+	if err != nil || source.Kind != CredentialSourceGitHubApp {
+		t.Fatalf("github-app source = %#v, %v", source, err)
+	}
+	// The rebuilt table must keep the refresh-claim columns working.
+	if _, err := s.ClaimCredentialSources(ctx, "worker", time.Now().Add(time.Hour), time.Minute, 5); err != nil {
+		t.Fatalf("claim after migration: %v", err)
+	}
+}

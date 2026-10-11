@@ -40,7 +40,9 @@ type fakeStore struct {
 	vaults map[string]*store.Vault
 	grants map[[2]string]string
 	creds  map[[2]string]*store.Credential
-	err    error
+	// sources holds reference-mode metadata; absent means a static value.
+	sources map[[2]string]*store.CredentialSource
+	err     error
 }
 
 func (f *fakeStore) GetAgentBySPIFFEID(_ context.Context, id string) (*store.Agent, error) {
@@ -70,6 +72,16 @@ func (f *fakeStore) GetVaultRole(_ context.Context, actorID, vaultID string) (st
 func (f *fakeStore) GetCredential(_ context.Context, vaultID, key string) (*store.Credential, error) {
 	if c, ok := f.creds[[2]string{vaultID, key}]; ok {
 		return c, nil
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (f *fakeStore) GetCredentialSource(_ context.Context, vaultID, key string) (*store.CredentialSource, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if src, ok := f.sources[[2]string{vaultID, key}]; ok {
+		return src, nil
 	}
 	return nil, sql.ErrNoRows
 }
@@ -185,6 +197,45 @@ func TestFetchSecretUnconnectedOAuthIsNotFound(t *testing.T) {
 		t.Fatalf("code = %v, want NotFound", status.Code(err))
 	}
 }
+
+func TestFetchSecretReferenceCredential(t *testing.T) {
+	now := time.Now().UTC()
+	cases := []struct {
+		name   string
+		source store.CredentialSource
+		code   codes.Code
+	}{
+		{"fresh cache is served", store.CredentialSource{
+			MaxStalenessSeconds: 3600, CacheUpdatedAt: &now, LastSuccessAt: &now,
+		}, codes.OK},
+		{"cache older than max_staleness", store.CredentialSource{
+			MaxStalenessSeconds: 60, CacheUpdatedAt: &now, LastSuccessAt: ptrTime(now.Add(-2 * time.Minute)),
+		}, codes.Unavailable},
+		{"never refreshed", store.CredentialSource{MaxStalenessSeconds: 3600}, codes.Unavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, fs := newFixture(t)
+			src := tc.source
+			src.Mode, src.Kind, src.ProviderName, src.Reference = "reference", store.CredentialSourceGitHubApp, "axel", "token"
+			fs.sources = map[[2]string]*store.CredentialSource{{"v1", "GITHUB_TOKEN"}: &src}
+			resp, err := p.FetchSecret(context.Background(), &credproviderpb.FetchSecretRequest{
+				Uri: "ate-secret://agent-vault/team-a/GITHUB_TOKEN", ActorSpiffeId: grantedActor,
+			})
+			if got := status.Code(err); got != tc.code {
+				t.Fatalf("code = %v (%v), want %v", got, err, tc.code)
+			}
+			if tc.code == codes.OK && string(resp.GetOpaqueBytes()) != "vault-token-123" {
+				t.Fatalf("secret = %q", resp.GetOpaqueBytes())
+			}
+			if tc.code != codes.OK && resp != nil {
+				t.Fatalf("non-OK response carried a payload")
+			}
+		})
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
 
 // --- mTLS ---
 

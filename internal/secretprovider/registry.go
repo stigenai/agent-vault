@@ -21,6 +21,7 @@ const (
 	KindOpenBaoKV2        = "openbao-kv-v2"
 	KindOnePassword       = "onepassword-connect"
 	KindInfisical         = "infisical"
+	KindGitHubApp         = "github-app"
 
 	MaxReferenceBytes = 4096
 	MaxSecretBytes    = 1 << 20
@@ -243,7 +244,7 @@ func (r *Registry) provider(name string) (SecretProvider, error) {
 
 func supportedKind(kind string) bool {
 	switch kind {
-	case KindAWSSecretsManager, KindOpenBaoKV2, KindOnePassword, KindInfisical:
+	case KindAWSSecretsManager, KindOpenBaoKV2, KindOnePassword, KindInfisical, KindGitHubApp:
 		return true
 	default:
 		return false
