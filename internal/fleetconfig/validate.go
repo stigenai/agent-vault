@@ -14,7 +14,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 var (
@@ -231,9 +230,8 @@ func addAgent(agents map[string]Agent, spiffeOwners map[string]string, agent Age
 	if err := broker.ValidateSlug(agent.Name); err != nil {
 		return fmt.Errorf("agent %q: %w", agent.Name, err)
 	}
-	id, err := spiffeid.FromString(agent.SPIFFEID)
-	if err != nil || id.String() != agent.SPIFFEID {
-		return fmt.Errorf("agent %q: spiffe_id must be an exact canonical SPIFFE ID", agent.Name)
+	if err := broker.ValidateAgentSPIFFEID(agent.SPIFFEID); err != nil {
+		return fmt.Errorf("agent %q: spiffe_id must be an exact canonical SPIFFE ID or spiffe://<domain>/actor/<atespace>/*", agent.Name)
 	}
 	if agent.Role != "owner" && agent.Role != "member" && agent.Role != "no-access" {
 		return fmt.Errorf("agent %q: role must be owner, member, or no-access", agent.Name)

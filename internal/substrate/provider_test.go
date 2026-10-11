@@ -41,9 +41,11 @@ type fakeStore struct {
 	grants map[[2]string]string
 	creds  map[[2]string]*store.Credential
 	err    error
+	looked []string // SPIFFE IDs passed to GetAgentBySPIFFEID, in order
 }
 
 func (f *fakeStore) GetAgentBySPIFFEID(_ context.Context, id string) (*store.Agent, error) {
+	f.looked = append(f.looked, id)
 	if f.err != nil {
 		return nil, f.err
 	}

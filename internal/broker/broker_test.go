@@ -1344,3 +1344,26 @@ func TestNormalizePortYAMLPortPreserved(t *testing.T) {
 		t.Fatalf("expected port=3000 preserved, got %v", svc.Port)
 	}
 }
+
+func TestValidateAgentSPIFFEID(t *testing.T) {
+	for _, id := range []string{
+		"spiffe://example.org/ns/a/sa/b",
+		"spiffe://substrate-actor.local/actor/factory/f-run-1",
+		"spiffe://substrate-actor.local/actor/factory/*",
+	} {
+		if err := ValidateAgentSPIFFEID(id); err != nil {
+			t.Errorf("%q: %v", id, err)
+		}
+	}
+	for _, id := range []string{
+		"", "not-a-spiffe-id", "spiffe://example.org/*",
+		"spiffe://substrate-actor.local/actor/*",
+		"spiffe://substrate-actor.local/actor/factory/x/*",
+		"spiffe://substrate-actor.local/other/factory/*",
+		"spiffe://substrate-actor.local/actor/*/x",
+	} {
+		if err := ValidateAgentSPIFFEID(id); err == nil {
+			t.Errorf("%q accepted", id)
+		}
+	}
+}

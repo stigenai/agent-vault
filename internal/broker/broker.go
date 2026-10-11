@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 // Config represents a vault's broker configuration as stored in YAML files.
@@ -1078,4 +1080,25 @@ func resolveHeaders(headers map[string]string, getCredential func(key string) (s
 		resolved[k] = out
 	}
 	return resolved, nil
+}
+
+// ValidateAgentSPIFFEID accepts an exact canonical SPIFFE ID, or the atespace
+// wildcard spiffe://<domain>/actor/<atespace>/* that the Substrate credential
+// provider resolves for actors without their own agent. Real SVIDs cannot
+// contain "*", so a wildcard record never matches a presented identity. It is
+// shared by the agent API and declarative fleet config so both accept the
+// same shapes; only agent records may use it.
+func ValidateAgentSPIFFEID(raw string) error {
+	if base, ok := strings.CutSuffix(raw, "/*"); ok {
+		id, err := spiffeid.FromString(base)
+		if err != nil || id.String() != base || len(strings.Split(id.Path(), "/")) != 3 || !strings.HasPrefix(id.Path(), "/actor/") {
+			return fmt.Errorf("invalid SPIFFE ID")
+		}
+		return nil
+	}
+	id, err := spiffeid.FromString(raw)
+	if err != nil || id.String() != raw {
+		return fmt.Errorf("invalid SPIFFE ID")
+	}
+	return nil
 }
