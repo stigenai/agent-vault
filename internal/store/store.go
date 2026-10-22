@@ -351,6 +351,12 @@ const (
 	CredentialSourceOpenBaoKV2        = "openbao-kv-v2"
 	CredentialSourceOnePassword       = "onepassword-connect"
 	CredentialSourceInfisical         = "infisical"
+	CredentialSourceSPIFFEJWTSVID     = "spiffe-jwt-svid"
+
+	// MaxSPIFFEJWTSVIDStalenessSeconds caps max_staleness for JWT-SVID
+	// sources. The provider only returns tokens with at least this much
+	// lifetime left, so a cached token is never served after it expires.
+	MaxSPIFFEJWTSVIDStalenessSeconds = 60
 
 	CredentialSourceHealthPending = "pending"
 	CredentialSourceHealthOK      = "ok"

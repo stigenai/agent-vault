@@ -14,6 +14,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
+	"github.com/Infisical/agent-vault/internal/store"
 )
 
 var (
@@ -334,7 +335,17 @@ func validateCredential(vault string, raw rawCredential, options LoadOptions) (C
 	}
 	result.Reference = reference.Canonical()
 	result.ProviderKind = reference.ProviderKind()
+	if result.ProviderKind == store.CredentialSourceSPIFFEJWTSVID {
+		if limit := time.Duration(store.MaxSPIFFEJWTSVIDStalenessSeconds) * time.Second; mustParse(stale) > limit {
+			return Credential{}, fmt.Errorf("vault %q credential %q: max_staleness must be at most %s for spiffe-jwt-svid", vault, result.Name, limit)
+		}
+	}
 	return result, nil
+}
+
+func mustParse(duration string) time.Duration {
+	parsed, _ := time.ParseDuration(duration)
+	return parsed
 }
 
 func validateDurations(refreshRaw, staleRaw string) (string, string, error) {
