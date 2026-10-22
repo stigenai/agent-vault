@@ -1136,12 +1136,15 @@ func validateCredentialSource(source CredentialSource) error {
 		return fmt.Errorf("credential source mode must be %q", CredentialSourceModeReference)
 	}
 	switch source.Kind {
-	case CredentialSourceAWSSecretsManager, CredentialSourceOpenBaoKV2, CredentialSourceOnePassword, CredentialSourceInfisical:
+	case CredentialSourceAWSSecretsManager, CredentialSourceOpenBaoKV2, CredentialSourceOnePassword, CredentialSourceInfisical, CredentialSourceSPIFFEJWTSVID:
 	default:
 		return fmt.Errorf("unsupported credential source kind %q", source.Kind)
 	}
 	if source.RefreshIntervalSeconds < 10 || source.MaxStalenessSeconds < 0 {
 		return fmt.Errorf("credential source refresh interval must be at least 10 seconds and max staleness non-negative")
+	}
+	if source.Kind == CredentialSourceSPIFFEJWTSVID && source.MaxStalenessSeconds > MaxSPIFFEJWTSVIDStalenessSeconds {
+		return fmt.Errorf("spiffe-jwt-svid max staleness must be at most %d seconds", MaxSPIFFEJWTSVIDStalenessSeconds)
 	}
 	if source.MaxStalenessSeconds == 0 &&
 		(source.Kind != CredentialSourceInfisical || !strings.HasPrefix(source.ProviderName, "legacy-infisical-")) {
