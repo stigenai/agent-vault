@@ -156,12 +156,34 @@ name = "infisical-production"
 kind = "infisical"
 
 [[secret_providers]]
+name = "axel"
+kind = "github-app"
+app_id = "2954702"
+installation_id = "112589902"
+private_key_provider = "onepassword-production" # another provider, never github-app
+private_key_ref = "Personal Agents/nixfleet-axel/private_key" # that provider's reference grammar
+# api_url = "https://api.github.com"            # GitHub Enterprise Server: https://<host>/api/v3
+
+[[secret_providers]]
 name = "spire"
 kind = "spiffe-jwt-svid"
 # workload_api = "unix:///spiffe-workload-api/spire-agent.sock" # default: auth.workload_api / SPIFFE_ENDPOINT_SOCKET
 ```
 
 AWS uses the SDK default chain, including EKS Pod Identity and IRSA. OpenBao requires server SPIFFE authentication and uses the live SPIRE Workload API source. A 1Password Connect token must be an `env://` or absolute `file://` reference; inline tokens are rejected and token files are re-read for every request.
+
+#### GitHub App installation tokens
+
+A `github-app` provider mints short-lived installation tokens itself, so the App's key is never copied into Agent Vault. On every mint it reads the PEM key (PKCS#1 or PKCS#8) from `private_key_provider` using `private_key_ref`, signs an RS256 App JWT (valid 9 minutes, `iss` = `app_id`), calls `POST {api_url}/app/installations/{installation_id}/access_tokens`, and discards the key. `private_key_provider` must name another configured provider that is not itself `github-app`, so chains are one hop and cannot cycle; this is checked at config load, and the key reference is validated at startup. Any failure to read the key or reach GitHub fails closed with the standard provider error codes, and upstream response bodies are never logged.
+
+Credential references select a field of the token:
+
+| Reference | Value |
+|---|---|
+| `token` | the raw installation token (for example for `Authorization: Bearer`) |
+| `basic` | base64 of `x-access-token:<token>`, for git HTTP Basic auth |
+
+Both fields share one in-memory token that is replaced 10 minutes before GitHub's `expires_at`. Token permissions and repositories are those granted to the installation; per-reference `permissions`/`repositories` narrowing is not supported. Installation tokens last an hour, so use a short `refresh_interval` (for example `5m`) and a `max_staleness` of `10m` or less, so a stale cache is refused before the token it holds can expire. The provider calls `api_url` directly and ignores proxy environment variables.
 
 ### Minting JWT-SVIDs for Kubernetes
 
@@ -268,7 +290,7 @@ client_ca_file = "/run/podidentity.podcert.ate.dev/trust-bundle.pem"
 # actor_trust_domain = "substrate-actor.local"                               # default
 ```
 
-The listener requires TLS 1.3 mTLS: the caller's certificate must chain to `client_ca_file` and carry `gateway_identity` as a URI SAN; both PEM files are re-read per handshake so projected certificates rotate without a restart. Credential URIs take the form `ate-secret://agent-vault/<vault>/<credential-key>`. A request is served only when `actor_spiffe_id` is in `actor_trust_domain` and equals the SPIFFE ID of an active agent that holds any role on `<vault>`, or, when no agent has that exact ID, matches an active agent registered as `spiffe://<domain>/actor/<atespace>/*` (the actor's ID with its last segment replaced by `*`) that holds the role (an exact agent without a grant is denied, not retried against the wildcard); otherwise it returns `PermissionDenied` (403 at the gateway, also for unknown vaults). A missing key returns `NotFound` (403); store outages return `Unavailable` (retryable 503). Static and already-connected OAuth credentials are served; OAuth refresh and dynamic leases are not. Point the gateway at it with `--credential-provider-name ate-secret://agent-vault --credential-provider-address <service>.<namespace>.svc:50051`.
+The listener requires TLS 1.3 mTLS: the caller's certificate must chain to `client_ca_file` and carry `gateway_identity` as a URI SAN; both PEM files are re-read per handshake so projected certificates rotate without a restart. Credential URIs take the form `ate-secret://agent-vault/<vault>/<credential-key>`. A request is served only when `actor_spiffe_id` is in `actor_trust_domain` and equals the SPIFFE ID of an active agent that holds any role on `<vault>`, or, when no agent has that exact ID, matches an active agent registered as `spiffe://<domain>/actor/<atespace>/*` (the actor's ID with its last segment replaced by `*`) that holds the role (an exact agent without a grant is denied, not retried against the wildcard); otherwise it returns `PermissionDenied` (403 at the gateway, also for unknown vaults). A missing key returns `NotFound` (403); store outages return `Unavailable` (retryable 503). Static and already-connected OAuth credentials are served; OAuth refresh and dynamic leases are not. `mode = "reference"` credentials (see [External secret providers](#external-secret-providers)) are served from the same refreshed, encrypted cache as the proxy path, and return `Unavailable` (retryable 503) when the cache was never filled or is older than `max_staleness`. Point the gateway at it with `--credential-provider-name ate-secret://agent-vault --credential-provider-address <service>.<namespace>.svc:50051`.
 
 ## Kubernetes fleet example
 

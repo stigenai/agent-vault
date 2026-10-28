@@ -223,6 +223,7 @@ Supported reference forms include:
 | AWS Secrets Manager | `secret-id[?version_id=ID\|version_stage=STAGE][#json-field]` |
 | OpenBao KV v2 | `mount/path[?version=N]#field` |
 | 1Password Connect | `vault/item/field` or `vault/item/section/field` |
+| GitHub App | `token` or `basic` (see [External secret providers](/self-hosting/runtime-configuration#external-secret-providers)) |
 | SPIFFE JWT-SVID | `spiffe://trust-domain/path?audience=AUD[&audience=AUD]`; `max_staleness` must be `60s` or less |
 
 ### One-time imports

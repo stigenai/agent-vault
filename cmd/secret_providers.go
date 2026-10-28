@@ -16,6 +16,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/openbaoauth"
 	"github.com/Infisical/agent-vault/internal/secretprovider"
 	"github.com/Infisical/agent-vault/internal/secretprovider/awssecretsmanager"
+	"github.com/Infisical/agent-vault/internal/secretprovider/githubapp"
 	"github.com/Infisical/agent-vault/internal/secretprovider/onepasswordconnect"
 	"github.com/Infisical/agent-vault/internal/secretprovider/openbaokv2"
 	"github.com/Infisical/agent-vault/internal/secretprovider/spiffejwtsvid"
@@ -99,6 +100,14 @@ func attachSecretProviders(srv *server.Server, cfg runtimeconfig.Runtime, dek []
 			provider, err = onepasswordconnect.New(onepasswordconnect.Options{
 				Address: configured.Address, TokenRef: configured.Token, Resolver: runtimeconfig.Resolver{},
 			})
+		case secretprovider.KindGitHubApp:
+			// The key provider is resolved lazily through the registry, so
+			// registration order does not matter.
+			provider, err = githubapp.New(githubapp.Options{
+				AppID: configured.AppID, InstallationID: configured.InstallationID, APIURL: configured.APIURL,
+				PrivateKeyProvider: configured.PrivateKeyProvider, PrivateKeyRef: configured.PrivateKeyRef,
+				Keys: registry,
+			})
 		case secretprovider.KindSPIFFEJWTSVID:
 			address := configured.WorkloadAPI
 			if address == "" {
@@ -121,6 +130,15 @@ func attachSecretProviders(srv *server.Server, cfg runtimeconfig.Runtime, dek []
 		}
 		if err := registry.Register(configured.Name, provider); err != nil {
 			return err
+		}
+	}
+
+	for _, configured := range cfg.SecretProviders {
+		if configured.Kind != secretprovider.KindGitHubApp {
+			continue
+		}
+		if _, err := registry.Parse(configured.PrivateKeyProvider, configured.PrivateKeyRef); err != nil {
+			return fmt.Errorf("secret provider %q private key reference is invalid: %w", configured.Name, err)
 		}
 	}
 

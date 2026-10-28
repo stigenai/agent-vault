@@ -1136,7 +1136,7 @@ func validateCredentialSource(source CredentialSource) error {
 		return fmt.Errorf("credential source mode must be %q", CredentialSourceModeReference)
 	}
 	switch source.Kind {
-	case CredentialSourceAWSSecretsManager, CredentialSourceOpenBaoKV2, CredentialSourceOnePassword, CredentialSourceInfisical, CredentialSourceSPIFFEJWTSVID:
+	case CredentialSourceAWSSecretsManager, CredentialSourceOpenBaoKV2, CredentialSourceOnePassword, CredentialSourceInfisical, CredentialSourceGitHubApp, CredentialSourceSPIFFEJWTSVID:
 	default:
 		return fmt.Errorf("unsupported credential source kind %q", source.Kind)
 	}

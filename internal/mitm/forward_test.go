@@ -44,6 +44,17 @@ func (s *recordingSink) snapshot() []requestlog.Record {
 	return out
 }
 
+// waitRecords returns the records once at least n exist, or after 2s. The
+// proxy emits the row after it flushes the body, so a client can finish first.
+// Callers assert the exact count on the result.
+func waitRecords(sink *recordingSink, n int) []requestlog.Record {
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sink.snapshot()) < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	return sink.snapshot()
+}
+
 // dialProxy opens a plain TCP connection to the proxy listener (no
 // CONNECT, no absolute-form request). Tests use it to write malformed
 // or hand-shaped request lines so we can exercise the dispatch
@@ -508,7 +519,7 @@ func TestMITMForwardEmitsRequestLogRow(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	rows := sink.snapshot()
+	rows := waitRecords(sink, 1)
 	if len(rows) != 1 {
 		t.Fatalf("got %d records, want 1", len(rows))
 	}
@@ -590,7 +601,7 @@ func TestMITMForwardKeepalivePersistsAcrossRequests(t *testing.T) {
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("upstream hits = %d, want 2", got)
 	}
-	if rows := sink.snapshot(); len(rows) != 2 {
+	if rows := waitRecords(sink, 2); len(rows) != 2 {
 		t.Fatalf("got %d log rows, want 2", len(rows))
 	}
 }

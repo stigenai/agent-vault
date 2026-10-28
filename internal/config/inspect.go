@@ -121,6 +121,8 @@ func inspectValue(c Runtime, name string) interface{} {
 				"address": provider.Address, "auth": provider.Auth, "auth_mount": provider.AuthMount,
 				"role": provider.Role, "audience": provider.Audience,
 				"trust_domains": append([]string(nil), provider.TrustDomains...), "token": provider.Token.String(),
+				"app_id": provider.AppID, "installation_id": provider.InstallationID, "api_url": provider.APIURL,
+				"private_key_provider": provider.PrivateKeyProvider, "private_key_ref": provider.PrivateKeyRef,
 			})
 		}
 		return providers
