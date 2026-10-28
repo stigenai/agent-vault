@@ -147,7 +147,7 @@ func TestPostgresHASPIFFEMigrationRerunKeepsGitHubAppSource(t *testing.T) {
 		return CredentialSource{
 			VaultID: vault.ID, CredentialKey: key, Mode: CredentialSourceModeReference,
 			Kind: kind, ProviderName: "p", Reference: "ref",
-			RefreshIntervalSeconds: 300, MaxStalenessSeconds: 600, Health: CredentialSourceHealthPending,
+			RefreshIntervalSeconds: 20, MaxStalenessSeconds: 60, Health: CredentialSourceHealthPending,
 		}
 	}
 	if _, err := s.SetCredentialSource(ctx, source("GITHUB", CredentialSourceGitHubApp)); err != nil {
