@@ -183,7 +183,8 @@ func decode(t *testing.T, segment string, into any) {
 
 func TestTokenCachedSharedAndRemintedNearExpiry(t *testing.T) {
 	f := newFixture(t, false)
-	if f.fetch(t, "token") != "ghs_token_1" || f.fetch(t, "token") != "ghs_token_1" {
+	first, second := f.fetch(t, "token"), f.fetch(t, "token")
+	if first != "ghs_token_1" || second != "ghs_token_1" {
 		t.Fatal("token was not reused")
 	}
 	basic := f.fetch(t, "basic")
