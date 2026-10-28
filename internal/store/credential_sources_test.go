@@ -228,3 +228,30 @@ func TestCredentialSourceAcceptsGitHubApp(t *testing.T) {
 		t.Fatalf("claim after migration: %v", err)
 	}
 }
+
+func TestSPIFFEJWTSVIDSourceCapsStaleness(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	vault, err := s.CreateVault(ctx, "jwt-svid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetCredential(ctx, vault.ID, "K8S_TOKEN", []byte("ct"), []byte("nonce")); err != nil {
+		t.Fatal(err)
+	}
+	source := CredentialSource{
+		VaultID: vault.ID, CredentialKey: "K8S_TOKEN", Mode: CredentialSourceModeReference,
+		Kind: CredentialSourceSPIFFEJWTSVID, ProviderName: "spire",
+		Reference:              "spiffe://example.org/agent/read?audience=kubernetes",
+		RefreshIntervalSeconds: 20, MaxStalenessSeconds: MaxSPIFFEJWTSVIDStalenessSeconds + 1,
+		Health: CredentialSourceHealthPending,
+	}
+	if _, err := s.SetCredentialSource(ctx, source); err == nil {
+		t.Fatal("staleness above the cap was accepted")
+	}
+	source.MaxStalenessSeconds = MaxSPIFFEJWTSVIDStalenessSeconds
+	saved, err := s.SetCredentialSource(ctx, source)
+	if err != nil || saved.Kind != CredentialSourceSPIFFEJWTSVID {
+		t.Fatalf("save = %#v, %v", saved, err)
+	}
+}

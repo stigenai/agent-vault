@@ -141,6 +141,8 @@ type SecretProviderConfig struct {
 	APIURL             string `toml:"api_url" json:"api_url,omitempty"`
 	PrivateKeyProvider string `toml:"private_key_provider" json:"private_key_provider,omitempty"`
 	PrivateKeyRef      string `toml:"private_key_ref" json:"private_key_ref,omitempty"`
+	// WorkloadAPI is the SPIRE Workload API address for spiffe-jwt-svid.
+	WorkloadAPI string `toml:"workload_api" json:"workload_api,omitempty"`
 }
 
 // Encryption contains compatibility key material until provider-backed DEK
@@ -542,6 +544,10 @@ func validateSecretProviders(providers []SecretProviderConfig, auth Auth) error 
 			}
 			if provider.Token.IsZero() {
 				return fmt.Errorf("%s.token: env:// or file:// reference is required", prefix)
+			}
+		case "spiffe-jwt-svid":
+			if provider.WorkloadAPI != "" && !strings.HasPrefix(provider.WorkloadAPI, "unix:///") {
+				return fmt.Errorf("%s.workload_api: must be a unix:/// address", prefix)
 			}
 		case "infisical":
 		case "github-app":

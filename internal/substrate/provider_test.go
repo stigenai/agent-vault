@@ -43,9 +43,11 @@ type fakeStore struct {
 	// sources holds reference-mode metadata; absent means a static value.
 	sources map[[2]string]*store.CredentialSource
 	err     error
+	looked  []string // SPIFFE IDs passed to GetAgentBySPIFFEID, in order
 }
 
 func (f *fakeStore) GetAgentBySPIFFEID(_ context.Context, id string) (*store.Agent, error) {
+	f.looked = append(f.looked, id)
 	if f.err != nil {
 		return nil, f.err
 	}

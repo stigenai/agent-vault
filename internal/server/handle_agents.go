@@ -11,7 +11,6 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/store"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 // reservedVaultNames are names that conflict with /vaults/* frontend routes.
@@ -30,15 +29,13 @@ func validVaultRole(s string) bool {
 	return s == "proxy" || s == "member" || s == "admin"
 }
 
+// validateAgentSPIFFEID allows an empty ID (unbound) or whatever
+// broker.ValidateAgentSPIFFEID accepts.
 func validateAgentSPIFFEID(raw string) error {
 	if raw == "" {
 		return nil
 	}
-	id, err := spiffeid.FromString(raw)
-	if err != nil || id.String() != raw {
-		return fmt.Errorf("invalid SPIFFE ID")
-	}
-	return nil
+	return broker.ValidateAgentSPIFFEID(raw)
 }
 
 func isUniqueAgentConstraint(err error) bool {
@@ -81,7 +78,7 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateAgentSPIFFEID(req.SPIFFEID); err != nil {
-		jsonError(w, http.StatusBadRequest, "spiffe_id must be an exact valid SPIFFE ID")
+		jsonError(w, http.StatusBadRequest, "spiffe_id must be an exact valid SPIFFE ID or spiffe://<domain>/actor/<atespace>/*")
 		return
 	}
 
@@ -468,7 +465,7 @@ func (s *Server) handleAgentSetSPIFFEID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := validateAgentSPIFFEID(*body.SPIFFEID); err != nil {
-		jsonError(w, http.StatusBadRequest, "spiffe_id must be empty or an exact valid SPIFFE ID")
+		jsonError(w, http.StatusBadRequest, "spiffe_id must be empty, an exact valid SPIFFE ID, or spiffe://<domain>/actor/<atespace>/*")
 		return
 	}
 	if err := s.store.UpdateAgentSPIFFEID(ctx, agent.ID, *body.SPIFFEID); err != nil {

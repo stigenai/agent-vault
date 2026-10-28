@@ -163,6 +163,11 @@ installation_id = "112589902"
 private_key_provider = "onepassword-production" # another provider, never github-app
 private_key_ref = "Personal Agents/nixfleet-axel/private_key" # that provider's reference grammar
 # api_url = "https://api.github.com"            # GitHub Enterprise Server: https://<host>/api/v3
+
+[[secret_providers]]
+name = "spire"
+kind = "spiffe-jwt-svid"
+# workload_api = "unix:///spiffe-workload-api/spire-agent.sock" # default: auth.workload_api / SPIFFE_ENDPOINT_SOCKET
 ```
 
 AWS uses the SDK default chain, including EKS Pod Identity and IRSA. OpenBao requires server SPIFFE authentication and uses the live SPIRE Workload API source. A 1Password Connect token must be an `env://` or absolute `file://` reference; inline tokens are rejected and token files are re-read for every request.
@@ -179,6 +184,82 @@ Credential references select a field of the token:
 | `basic` | base64 of `x-access-token:<token>`, for git HTTP Basic auth |
 
 Both fields share one in-memory token that is replaced 10 minutes before GitHub's `expires_at`. Token permissions and repositories are those granted to the installation; per-reference `permissions`/`repositories` narrowing is not supported. Installation tokens last an hour, so use a short `refresh_interval` (for example `5m`) and a `max_staleness` of `10m` or less, so a stale cache is refused before the token it holds can expire. The provider calls `api_url` directly and ignores proxy environment variables.
+
+### Minting JWT-SVIDs for Kubernetes
+
+The `spiffe-jwt-svid` provider turns a fleet credential into a fresh JWT-SVID fetched from the SPIRE Workload API. An agent behind the egress gateway then authenticates to a Kubernetes API server as a SPIFFE identity without ever holding a credential.
+
+A key reference is a SPIFFE ID plus one or more audiences:
+
+```toml
+[[vaults.credentials]]
+name = "K8S_TOKEN"
+mode = "reference"
+source = "spire"
+ref = "spiffe://example.org/agent/read?audience=kubernetes"
+refresh_interval = "20s"
+max_staleness = "60s"
+```
+
+The SPIFFE ID is the subject requested from the Workload API. The first `audience` is the primary audience; repeat the parameter for extra audiences.
+
+**Expiry.** The provider caches one token per subject and audience set and fetches a new one when a third of its lifetime, and never less than 60 seconds, remains. Every token it returns has at least 60 seconds left. The stored copy is bound to that: `max_staleness` for this kind is capped at `60s` and a longer value is rejected. Use `refresh_interval` between `10s` and `30s`. If refreshes stop, use fails closed within a minute, before the cached token expires.
+
+**SPIRE registration.** The Agent Vault pod needs the SPIFFE ID it will request, in addition to its own identity. Register it with a ClusterSPIFFEID that selects the pod:
+
+```yaml
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: agent-vault-read
+spec:
+  spiffeIDTemplate: "spiffe://example.org/agent/read"
+  podSelector:
+    matchLabels:
+      app: agent-vault
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: agent-vault
+```
+
+Mount the Workload API socket with the SPIFFE CSI driver:
+
+```yaml
+volumes:
+  - name: spiffe-workload-api
+    csi:
+      driver: csi.spiffe.io
+      readOnly: true
+containers:
+  - name: agent-vault
+    volumeMounts:
+      - name: spiffe-workload-api
+        mountPath: /spiffe-workload-api
+        readOnly: true
+    env:
+      - name: SPIFFE_ENDPOINT_SOCKET
+        value: unix:///spiffe-workload-api/spire-agent.sock
+```
+
+A request for a SPIFFE ID the pod was not issued reports `access_denied`; an unreachable socket reports `provider_unavailable`.
+
+**Kubernetes API server.** Trust the SPIRE OIDC discovery endpoint with an `AuthenticationConfiguration` (`--authentication-config`):
+
+```yaml
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: https://oidc-discovery.example.org
+      audiences:
+        - kubernetes
+    claimMappings:
+      username:
+        claim: sub
+        prefix: ""
+```
+
+Then bind RBAC to the user `spiffe://example.org/agent/read`.
 
 ### SPIFFE authentication modes
 
@@ -209,7 +290,7 @@ client_ca_file = "/run/podidentity.podcert.ate.dev/trust-bundle.pem"
 # actor_trust_domain = "substrate-actor.local"                               # default
 ```
 
-The listener requires TLS 1.3 mTLS: the caller's certificate must chain to `client_ca_file` and carry `gateway_identity` as a URI SAN; both PEM files are re-read per handshake so projected certificates rotate without a restart. Credential URIs take the form `ate-secret://agent-vault/<vault>/<credential-key>`. A request is served only when `actor_spiffe_id` is in `actor_trust_domain` and equals the SPIFFE ID of an active agent that holds any role on `<vault>`; otherwise it returns `PermissionDenied` (403 at the gateway, also for unknown vaults). A missing key returns `NotFound` (403); store outages return `Unavailable` (retryable 503). Static and already-connected OAuth credentials are served; OAuth refresh and dynamic leases are not. `mode = "reference"` credentials (see [External secret providers](#external-secret-providers)) are served from the same refreshed, encrypted cache as the proxy path, and return `Unavailable` (retryable 503) when the cache was never filled or is older than `max_staleness`. Point the gateway at it with `--credential-provider-name ate-secret://agent-vault --credential-provider-address <service>.<namespace>.svc:50051`.
+The listener requires TLS 1.3 mTLS: the caller's certificate must chain to `client_ca_file` and carry `gateway_identity` as a URI SAN; both PEM files are re-read per handshake so projected certificates rotate without a restart. Credential URIs take the form `ate-secret://agent-vault/<vault>/<credential-key>`. A request is served only when `actor_spiffe_id` is in `actor_trust_domain` and equals the SPIFFE ID of an active agent that holds any role on `<vault>`, or, when no agent has that exact ID, matches an active agent registered as `spiffe://<domain>/actor/<atespace>/*` (the actor's ID with its last segment replaced by `*`) that holds the role (an exact agent without a grant is denied, not retried against the wildcard); otherwise it returns `PermissionDenied` (403 at the gateway, also for unknown vaults). A missing key returns `NotFound` (403); store outages return `Unavailable` (retryable 503). Static and already-connected OAuth credentials are served; OAuth refresh and dynamic leases are not. `mode = "reference"` credentials (see [External secret providers](#external-secret-providers)) are served from the same refreshed, encrypted cache as the proxy path, and return `Unavailable` (retryable 503) when the cache was never filled or is older than `max_staleness`. Point the gateway at it with `--credential-provider-name ate-secret://agent-vault --credential-provider-address <service>.<namespace>.svc:50051`.
 
 ## Kubernetes fleet example
 

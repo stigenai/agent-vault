@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/secretprovider/githubapp"
 	"github.com/Infisical/agent-vault/internal/secretprovider/onepasswordconnect"
 	"github.com/Infisical/agent-vault/internal/secretprovider/openbaokv2"
+	"github.com/Infisical/agent-vault/internal/secretprovider/spiffejwtsvid"
 	"github.com/Infisical/agent-vault/internal/secretrefresh"
 	"github.com/Infisical/agent-vault/internal/server"
 	"github.com/Infisical/agent-vault/internal/store"
@@ -38,10 +40,14 @@ func attachSecretProviders(srv *server.Server, cfg runtimeconfig.Runtime, dek []
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelStartup()
 	var ownedJWT []*workloadapi.JWTSource
+	var ownedProviders []io.Closer
 	defer func() {
 		if returnErr != nil {
 			for _, source := range ownedJWT {
 				_ = source.Close()
+			}
+			for _, closer := range ownedProviders {
+				_ = closer.Close()
 			}
 		}
 	}()
@@ -102,6 +108,17 @@ func attachSecretProviders(srv *server.Server, cfg runtimeconfig.Runtime, dek []
 				PrivateKeyProvider: configured.PrivateKeyProvider, PrivateKeyRef: configured.PrivateKeyRef,
 				Keys: registry,
 			})
+		case secretprovider.KindSPIFFEJWTSVID:
+			address := configured.WorkloadAPI
+			if address == "" {
+				address = cfg.Auth.WorkloadAPI
+			}
+			var jwtProvider *spiffejwtsvid.Provider
+			jwtProvider, err = spiffejwtsvid.New(startupCtx, spiffejwtsvid.Options{Address: address})
+			if err == nil {
+				provider = jwtProvider
+				ownedProviders = append(ownedProviders, jwtProvider)
+			}
 		case secretprovider.KindInfisical:
 			if infisicalClient == nil {
 				return fmt.Errorf("secret provider %q requires configured Infisical machine identity", configured.Name)
@@ -147,6 +164,9 @@ func attachSecretProviders(srv *server.Server, cfg runtimeconfig.Runtime, dek []
 	srv.AttachSecretRefreshScheduler(scheduler)
 	for _, source := range ownedJWT {
 		srv.AttachSecretProviderCloser(source)
+	}
+	for _, closer := range ownedProviders {
+		srv.AttachSecretProviderCloser(closer)
 	}
 	logger.Info("secret provider refresh configured", slog.Int("providers", len(registry.Names())))
 	return nil
