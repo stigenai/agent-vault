@@ -2,9 +2,10 @@ package store
 
 import "gorm.io/gorm"
 
-const credentialSourceKinds = `'aws-secrets-manager','openbao-kv-v2','onepassword-connect','infisical','github-app'`
+const credentialSourceKinds = `'aws-secrets-manager','openbao-kv-v2','onepassword-connect','infisical','spiffe-jwt-svid','github-app'`
 
-// Widens credential_sources.kind to admit github-app. Postgres swaps the
+// Widens credential_sources.kind to admit github-app. The list must hold every
+// kind that an earlier migration admitted, such as spiffe-jwt-svid. Postgres swaps the
 // CHECK constraint; SQLite cannot alter one, so the table is rebuilt.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
