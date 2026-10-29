@@ -2,14 +2,14 @@ package store
 
 import "gorm.io/gorm"
 
-// Widens the credential_sources.kind CHECK to accept spiffe-jwt-svid.
+// Widens the credential_sources.kind CHECK to accept spiffe-jwt-svid. It writes
+// the full current list, so the CHECK stays wide when this migration runs after a later one.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
-		const kinds = `'aws-secrets-manager','openbao-kv-v2','onepassword-connect','infisical','spiffe-jwt-svid'`
 		if db.Name() == "postgres" {
 			for _, statement := range []string{
 				`ALTER TABLE credential_sources DROP CONSTRAINT IF EXISTS credential_sources_kind_check`,
-				`ALTER TABLE credential_sources ADD CONSTRAINT credential_sources_kind_check CHECK(kind IN (` + kinds + `))`,
+				`ALTER TABLE credential_sources ADD CONSTRAINT credential_sources_kind_check CHECK(kind IN (` + credentialSourceKinds + `))`,
 			} {
 				if err := db.Exec(statement).Error; err != nil {
 					return err
@@ -23,7 +23,7 @@ func init() {
 				vault_id TEXT NOT NULL,
 				credential_key TEXT NOT NULL,
 				mode TEXT NOT NULL CHECK(mode IN ('reference')),
-				kind TEXT NOT NULL CHECK(kind IN (` + kinds + `)),
+				kind TEXT NOT NULL CHECK(kind IN (` + credentialSourceKinds + `)),
 				provider_name TEXT NOT NULL,
 				reference TEXT NOT NULL,
 				refresh_interval_seconds INTEGER NOT NULL CHECK(refresh_interval_seconds >= 10),
